@@ -1,0 +1,32 @@
+# B站登录 Cookie（敏感信息，绝对不能上传）
+.sessdata
+
+# 输出目录（分析结果，体积大）
+bilibili_output/
+output/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Playwright MCP
+.playwright-mcp/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 临时文件
+*.tmp
+*.log
+.vs/
