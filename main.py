@@ -18,7 +18,9 @@ if sys.stderr.encoding != "utf-8":
 # 确保能找到模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ranking import VideoInfo, fetch_weekly_videos, fetch_weekly_series, get_series_info
+from ranking import (
+    VideoInfo, fetch_weekly_videos, fetch_weekly_series, get_latest_series_number, get_series_info,
+)
 from comments import fetch_comments, fetch_comments_maximized, check_login
 from danmaku import fetch_video_danmaku, danmaku_from_dict
 from stats import build_statistics, print_report, save_results
@@ -692,36 +694,23 @@ def main():
     use_checkpoint = not args.no_checkpoint
     use_adaptive = not args.no_adaptive
 
-    # 获取榜单元信息
+    # 确定期号：未指定时必须先查出最新期号（接口不带期号时返回的是第 1 期）
     series_number = args.series
-    info = None
-    series_name = ""
-    if series_number:
-        info = get_series_info(series_number)
-        if info:
-            print(f"  第 {info['number']} 期: {info['name']} ({info['video_count']} 个视频)")
-            series_name = info["name"]
-        else:
-            print(f"  第 {series_number} 期")
-    else:
-        print("  最新一期")
-
-    videos = fetch_weekly_videos(series_number)
-
-    # 未指定期号时，从期号列表取最新一期的期号（断点续传按期号匹配目录）
     if not series_number:
         try:
-            series_list = fetch_weekly_series()
-            if series_list:
-                latest = max(series_list, key=lambda x: x["number"])
-                series_number = latest["number"]
-                series_name = latest.get("name", "")
-                info = {"number": series_number, "name": series_name,
-                        "video_count": len(videos)}
-                print(f"  第 {series_number} 期: {series_name} ({len(videos)} 个视频)")
+            series_number = get_latest_series_number()
         except Exception as e:
-            print(f"  ⚠️ 获取最新期号失败（本次不做断点续传匹配）: {e}")
+            print(f"  ✗ 获取最新期号失败: {e}\n  可以用 -s 手动指定期号")
+            return
+        print(f"  最新一期: 第 {series_number} 期")
 
+    series_name = ""
+    info = get_series_info(series_number)
+    if info:
+        series_name = info["name"]
+        print(f"  第 {info['number']} 期: {series_name} ({info['video_count']} 个视频)")
+
+    videos = fetch_weekly_videos(series_number)
     print(f"  获取到 {len(videos)} 个视频\n")
 
     # 限制处理的视频数量

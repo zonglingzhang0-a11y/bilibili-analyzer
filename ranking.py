@@ -43,9 +43,17 @@ def fetch_weekly_series() -> list[dict]:
     return data["data"]["list"]  # 包含 number, name, subject 等
 
 
+def get_latest_series_number() -> int:
+    """最新一期的期号"""
+    return max(item["number"] for item in fetch_weekly_series())
+
+
 @lru_cache(maxsize=8)
 def _fetch_series_one(series_number: int = None, max_retries: int = 3) -> dict:
     """请求 popular/series/one，遇到 -352（签名失效）时刷新 key 后重试
+
+    series_number 为 None 时先从期号列表取最新期号：该接口不带 number 参数时
+    返回的是第 1 期（2019 年），而不是最新一期。
 
     结果按期号缓存：主流程会先后调用 get_series_info 和 fetch_weekly_videos，
     避免同一期重复请求。返回值请勿修改。
@@ -53,9 +61,9 @@ def _fetch_series_one(series_number: int = None, max_retries: int = 3) -> dict:
     Returns:
         接口返回的 data 字段
     """
-    params = {}
-    if series_number is not None:
-        params["number"] = series_number
+    if series_number is None:
+        series_number = get_latest_series_number()
+    params = {"number": series_number}
 
     signer = get_signer()
     data = {}
