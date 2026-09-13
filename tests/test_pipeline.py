@@ -294,3 +294,30 @@ def test_tee_writes_to_terminal_and_log(tmp_path):
         print("采集中 ✓", file=tee, flush=True)
     assert terminal.getvalue() == "采集中 ✓\n"
     assert log_path.read_text(encoding="utf-8") == "采集中 ✓\n"
+
+
+class _ErrorCodeClient:
+    def __init__(self, code, message):
+        self.payload = {"code": code, "message": message}
+
+    def get(self, url, params=None):
+        return _FakeResponse(self.payload)
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("code, message", [(12061, "UP主已关闭评论区"), (12002, "评论区已关闭")])
+def test_closed_comment_section_is_not_a_failure(monkeypatch, code, message):
+    _patch_comment_session(monkeypatch, _ErrorCodeClient(code, message))
+
+    result, total, info = comments.fetch_comments_full(1)
+
+    assert result == [] and info["collected"] == 0
+
+
+def test_unexpected_error_code_is_incomplete(monkeypatch):
+    _patch_comment_session(monkeypatch, _ErrorCodeClient(-352, "风控校验失败"))
+
+    with pytest.raises(comments.CommentsIncomplete):
+        comments.fetch_comments_full(1)

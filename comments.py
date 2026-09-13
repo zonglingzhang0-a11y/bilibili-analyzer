@@ -42,6 +42,9 @@ class Comment:
 
 # 全量采集时的翻页上限（每页 20 条，足够覆盖任何视频），只作为防止死循环的保护
 FULL_MAX_PAGES = 100_000
+# 表示视频本身没有可采评论的接口返回码：采到 0 条是正常结果，不算失败
+# 12002=评论区已关闭，12061=UP主已关闭评论区，-404=无此资源
+COMMENTS_UNAVAILABLE_CODES = (12002, 12061, -404)
 # 网络出错（超时、SSL 断连等）时同一页的最大重试次数，等待 15s 起翻倍、最长 240s，合计约 12 分钟
 MAX_NETWORK_RETRIES = 6
 
@@ -272,10 +275,12 @@ def fetch_comments(
                 break
 
             if data["code"] != 0:
-                # 12002=评论区关闭, -404=无此资源，其余错误仅首页时提示
-                if len(comments) == 0 and data["code"] not in (12002, -404):
+                closed = data["code"] in COMMENTS_UNAVAILABLE_CODES
+                if len(comments) == 0 and closed:
+                    print(f"  (评论区不可用: {data.get('message') or data['code']})", end=" ")
+                elif len(comments) == 0:
                     print(f"  评论接口报错 code={data['code']}: {data.get('message', '')}")
-                if len(comments) > 0 or data["code"] not in (12002, -404):
+                if len(comments) > 0 or not closed:
                     stop_incomplete(f"评论接口报错 code={data['code']}: {data.get('message', '')}")
                 break
 
