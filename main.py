@@ -42,7 +42,9 @@ from adaptive_retry import (
 DEFAULT_COMMENT_PAGES = 100
 # 评论重采的进度文件（放在运行目录下，支持中断后继续）
 RECOLLECT_STATE_FILE = "comments_recollect.json"
-# 评论重采时连续失败这么多个视频就暂停：多半是网络或限流问题还没过去，继续只会把后面的视频都刷成失败
+# 日志中每次运行开始时写入的标记行
+RUN_START_MARKER = "🕒 开始运行:"
+# 连续失败这么多个视频就暂停：多半是网络或限流问题还没过去，继续只会把后面的视频都刷成失败
 MAX_CONSECUTIVE_RECOLLECT_FAILURES = 3
 
 
@@ -558,14 +560,14 @@ def _save_recollect_state(run_dir: str, state: dict):
 
 def _recollect_comments_only(output_root: str, maximize: bool = True,
                              comment_max_pages: int = DEFAULT_COMMENT_PAGES,
-                             full: bool = False):
+                             full: bool = False, run_name: str = None):
     """仅重新采集最新一次运行中已完成视频的评论，更新 stats 和报告
 
     支持中断后继续：每个视频采完就记录到运行目录的 comments_recollect.json，
     重新运行同一命令时跳过已按相同方式（或全量）采过的视频。
     """
-    run_dir = _latest_run_dir(output_root)
-    if not run_dir:
+    run_dir = os.path.join(output_root, run_name) if run_name else _latest_run_dir(output_root)
+    if not run_dir or _load_resume_state(run_dir) is None:
         print("错误: 找不到可用的运行目录（需包含 resume_state.json）")
         return
 
@@ -798,12 +800,22 @@ def main():
                              "指定运行目录则只重建该目录，否则重建 -o 下全部")
     parser.add_argument("--log-file", type=str, default=None, metavar="PATH",
                         help="输出同时追加写入该日志文件（UTF-8），便于长时间运行时事后查看")
+    parser.add_argument("--run-name", type=str, default=None, metavar="NAME",
+                        help="指定运行目录名（位于 -o 下，如 20260911_180000）；目录已存在时接着其中的进度继续。"
+                             "配合 --comments-only 时表示重采该目录")
     args = parser.parse_args()
 
+    if args.run_name and (os.path.basename(args.run_name) != args.run_name
+                          or args.run_name in (".", "..")):
+        parser.error("--run-name 只能是目录名，不能包含路径")
+
     if args.log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(args.log_file)), exist_ok=True)
         log_file = open(args.log_file, "a", encoding="utf-8", buffering=1)
         sys.stdout = _Tee(sys.stdout, log_file)
         sys.stderr = _Tee(sys.stderr, log_file)
+        # 日志是追加写入的，用这一行标记每次运行的起点（进度看板据此计算本次运行的速度）
+        print(f"{RUN_START_MARKER} {datetime.now():%Y-%m-%d %H:%M:%S}  参数: {' '.join(sys.argv[1:])}")
 
     comment_max_pages = args.limit if args.limit > 0 else DEFAULT_COMMENT_PAGES
     maximize_comments = not args.no_maximize_comments
@@ -843,7 +855,7 @@ def main():
     # ── 仅重新采集评论模式 ──
     if args.comments_only:
         _recollect_comments_only(args.output, maximize_comments, comment_max_pages,
-                                 full=args.full_comments)
+                                 full=args.full_comments, run_name=args.run_name)
         return
 
     # 周热榜模式
@@ -878,12 +890,21 @@ def main():
     if args.number > 0:
         videos = videos[:args.number]
 
-    # ── 智能输出目录：断点续传时复用同一期未完成的目录 ──
-    output_base = _find_resumable_dir(args.output, series_number) if use_checkpoint else None
-    if output_base:
-        print(f"📋 断点续传模式：复用目录 {os.path.basename(output_base)}")
+    # ── 输出目录：指定了 --run-name 就用它；否则断点续传时复用同一期未完成的目录 ──
+    if args.run_name:
+        output_base = os.path.join(args.output, args.run_name)
+        existing = _load_resume_state(output_base)
+        if existing and existing.get("series_number") not in (None, series_number):
+            print(f"✗ 目录 {args.run_name} 里是第 {existing['series_number']} 期的数据，"
+                  f"与本次第 {series_number} 期不一致，已中止")
+            return
+        print(f"📁 运行目录: {args.run_name}" + ("（接着已有进度继续）" if existing else ""))
     else:
-        output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
+        output_base = _find_resumable_dir(args.output, series_number) if use_checkpoint else None
+        if output_base:
+            print(f"📋 断点续传模式：复用目录 {os.path.basename(output_base)}")
+        else:
+            output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(output_base, exist_ok=True)
 
     # ── 初始化断点续传 ──
@@ -923,6 +944,8 @@ def main():
 
     # ── 逐个处理 ──
     all_stats = []
+    consecutive_failures = 0
+    paused = False
     for i, v in enumerate(videos, 1):
         progress = ""
         if checkpoint:
@@ -950,11 +973,19 @@ def main():
             all_stats.append(_summary_entry(job))
 
         # 通知限流器：有采集失败项同样视为失败，拉长后续冷却
+        succeeded = bool(job and not job.failures)
         if inter_video_limiter:
-            if job and not job.failures:
+            if succeeded:
                 inter_video_limiter.record_success()
             else:
                 inter_video_limiter.record_failure()
+
+        consecutive_failures = 0 if succeeded else consecutive_failures + 1
+        if consecutive_failures >= MAX_CONSECUTIVE_RECOLLECT_FAILURES:
+            print(f"\n⛔ 连续 {consecutive_failures} 个视频采集失败，可能是网络异常或被限流，已暂停。"
+                  "\n   请确认网络正常后重新运行同一命令，已完成的视频会自动跳过。", flush=True)
+            paused = True
+            break
 
         # 自适应视频间冷却
         if i < len(videos):
@@ -965,9 +996,10 @@ def main():
             else:
                 time.sleep(60)
 
-    # ── 重试失败项 ──
-    _retry_failed(retry_queue, all_stats, checkpoint,
-                  comment_limiter, danmaku_limiter, inter_video_limiter)
+    # ── 重试失败项（因连续失败暂停时跳过：网络或限流问题多半还没恢复） ──
+    if not paused:
+        _retry_failed(retry_queue, all_stats, checkpoint,
+                      comment_limiter, danmaku_limiter, inter_video_limiter)
 
     # 断点续传时，汇总应覆盖整个运行目录中已完成的视频，而不只是本次新处理的
     if checkpoint:

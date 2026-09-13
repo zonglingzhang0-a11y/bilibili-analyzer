@@ -60,6 +60,7 @@ python main.py --aid 47126553
 | `--comments-only` | 只重新采集最近一次运行中已完成视频的评论（支持中断后继续） |
 | `--rebuild [RUN_DIR]` | 离线重建：用已保存的评论/弹幕重新统计并生成报告，不联网 |
 | `--log-file PATH` | 输出同时追加写入日志文件（UTF-8），适合长时间运行 |
+| `--run-name NAME` | 指定运行目录名（如 `20260911_180000`）；目录已存在时接着其中的进度继续；配合 `--comments-only` 表示重采该目录 |
 
 ### 断点续传与失败重试
 
@@ -78,6 +79,17 @@ python main.py --comments-only --full-comments   # 为最近一次运行的视�
 - 耗时较长，建议在独立的终端窗口运行，并加上 `--log-file` 保存日志：`python main.py --comments-only --full-comments --log-file recollect.log`
 - 网络出错（超时、SSL 断连等）时自动重试同一页，最多约 12 分钟，已采到的进度不丢。
 - 某个视频最终失败时保留原有数据、不记为完成，冷却 5 分钟后继续下一个；连续 3 个视频失败会自动暂停，确认网络正常后重新运行同一命令即可继续。
+
+### 进度看板
+
+长时间运行时，可以在浏览器里实时查看进度（只读，不影响采集）：
+
+```bash
+python main.py -s 389 --full-comments --run-name 20260911_180000 --log-file bilibili_output/20260911_180000/run.log
+python dashboard.py bilibili_output/20260911_180000          # 另开一个终端，然后打开 http://127.0.0.1:8765
+```
+
+看板显示已完成视频数、按评论量计的进度、当前视频所处阶段和翻页进度、网络重试/失败事件、预计剩余时间，以及每个视频的评论数和弹幕数。完整采集和 `--comments-only` 评论重采都支持。连续 3 个视频失败时程序会自动暂停。
 
 ### 离线重建
 
@@ -134,6 +146,7 @@ python -m pytest
 | `stats.py` | 统计分析（情感、词频、热力图、高潮检测、跨视频对比） |
 | `report_writer.py` | 图表与 Markdown 报告 |
 | `rebuild.py` | 离线重建 |
+| `dashboard.py` | 采集进度看板 |
 | `checkpoint_manager.py` / `adaptive_retry.py` | 断点续传清单、自适应限流与重试队列 |
 | `wbi.py` / `bili_auth.py` / `bili_http.py` | WBI 签名、登录凭证、公共请求配置 |
 
