@@ -127,3 +127,99 @@ def test_fetch_comments_stops_when_pages_repeat(monkeypatch):
 
     assert len(result) == 20
     assert client.requests == 2
+
+
+class _RateLimitedClient:
+    def __init__(self):
+        self.requests = 0
+
+    def get(self, url, params=None):
+        self.requests += 1
+        response = _FakeResponse({})
+        response.status_code = 412
+        return response
+
+    def close(self):
+        pass
+
+
+def _patch_comment_session(monkeypatch, client):
+    monkeypatch.setattr(comments, "_build_session", lambda: client)
+    monkeypatch.setattr(comments, "_try_sign_params", lambda params: params)
+    monkeypatch.setattr(comments.time, "sleep", lambda *_: None)
+
+
+def test_rate_limit_exhaustion_is_reported_as_incomplete(monkeypatch):
+    _patch_comment_session(monkeypatch, _RateLimitedClient())
+    assert comments.fetch_comments(1, max_pages=5) == ([], 0)
+    with pytest.raises(comments.CommentsIncomplete):
+        comments.fetch_comments(1, max_pages=5, raise_on_incomplete=True)
+
+
+class _FinitePagesClient:
+    """3 页评论，最后一页 is_end 且 next=0"""
+
+    def __init__(self):
+        self.requests = 0
+
+    def get(self, url, params=None):
+        self.requests += 1
+        start = (self.requests - 1) * 20
+        replies = [{"rpid": i, "oid": 1, "mid": i, "member": {"uname": "u"},
+                    "content": {"message": "好"}, "ctime": 0, "like": 0, "rcount": 2}
+                   for i in range(start, start + 20)]
+        last = self.requests == 3
+        return _FakeResponse({"code": 0, "data": {
+            "replies": replies,
+            "cursor": {"next": 0 if last else self.requests + 1, "is_end": last,
+                       "is_begin": self.requests == 1, "all_count": 100},
+        }})
+
+    def close(self):
+        pass
+
+
+def test_fetch_comments_full_pages_until_the_end(monkeypatch):
+    client = _FinitePagesClient()
+    _patch_comment_session(monkeypatch, client)
+
+    result, total, info = comments.fetch_comments_full(1)
+
+    assert len(result) == 60 and client.requests == 3
+    assert info == {"strategy": "full", "collected": 60, "reported_total": 100, "sub_replies": 120}
+
+
+def test_comments_only_resumes_and_skips_finished_videos(tmp_path, monkeypatch):
+    run = tmp_path / "20260913_000000"
+    run.mkdir()
+    videos = {}
+    for aid in (1, 2):
+        video_dir = run / f"{aid}_视频{aid}"
+        video_dir.mkdir()
+        (video_dir / "stats.json").write_text(json.dumps({
+            "owner_mid": 7, "comments": {"total": 6}, "video_info": {"title": f"视频{aid}"},
+        }), encoding="utf-8")
+        videos[str(aid)] = {"aid": aid, "title": f"视频{aid}", "state": "completed",
+                            "output_dir": f"{aid}_视频{aid}"}
+    (run / "resume_state.json").write_text(
+        json.dumps({"series_number": 390, "total_videos": 2, "videos": videos}), encoding="utf-8")
+    (run / main.RECOLLECT_STATE_FILE).write_text(
+        json.dumps({"1": {"strategy": "full", "count": 500}}), encoding="utf-8")
+
+    fetched = []
+
+    def fake_full(aid, progress_callback=None, limiter=None):
+        fetched.append(aid)
+        return [make_comment(i) for i in range(30)], 50, {"strategy": "full", "collected": 30,
+                                                          "reported_total": 50, "sub_replies": 0}
+
+    monkeypatch.setattr(main, "fetch_comments_full", fake_full)
+
+    main._recollect_comments_only(str(tmp_path), full=True)
+
+    assert fetched == [2]
+    state = json.loads((run / main.RECOLLECT_STATE_FILE).read_text(encoding="utf-8"))
+    assert state["2"]["strategy"] == "full" and state["2"]["count"] == 30
+    stats = json.loads((run / "2_视频2" / "stats.json").read_text(encoding="utf-8"))
+    assert stats["comments"]["total"] == 30
+    assert stats["comment_collection"]["strategy"] == "full"

@@ -40,6 +40,18 @@ class Comment:
     up_replied: bool = False  # 接口 up_action.reply：UP主是否回复过该评论
 
 
+# 全量采集时的翻页上限（每页 20 条，足够覆盖任何视频），只作为防止死循环的保护
+FULL_MAX_PAGES = 100_000
+
+
+class CommentsIncomplete(RuntimeError):
+    """评论没有采完（限流重试耗尽或中途接口出错）"""
+
+    def __init__(self, message: str, collected: int):
+        super().__init__(f"{message}（已采 {collected} 条）")
+        self.collected = collected
+
+
 def _parse_ctime(value) -> int:
     """comments.json 中的 ctime 是 ISO 时间字符串（空串表示未知），还原为时间戳"""
     if isinstance(value, str):
@@ -142,6 +154,7 @@ def fetch_comments(
     sort_mode: int = 2,
     progress_callback=None,
     limiter=None,
+    raise_on_incomplete: bool = False,
 ) -> tuple[list[Comment], int]:
     """采集视频评论
 
@@ -155,6 +168,8 @@ def fetch_comments(
         sort_mode: 排序模式 (2=时间倒序, 3=热度排序)
         progress_callback: 进度回调 (collected_count, total_count)
         limiter: 可选的 AdaptiveRateLimiter，提供时由它控制页间延迟
+        raise_on_incomplete: 限流重试耗尽或中途出错时抛出 CommentsIncomplete，
+            而不是返回已采到的部分（全量采集需要区分"采完"和"没采完"）
 
     Returns:
         (评论列表, 总评论数)
@@ -176,6 +191,10 @@ def fetch_comments(
         nonlocal client
         client.close()
         client = _build_session()
+
+    def stop_incomplete(reason: str):
+        if raise_on_incomplete:
+            raise CommentsIncomplete(reason, len(comments))
 
     try:
         while page < max_pages:
@@ -201,6 +220,7 @@ def fetch_comments(
                 if ban_retries > max_ban_retries:
                     if len(comments) == 0:
                         print(f"  评论被限流(412)，已重试{ban_retries}次仍失败，跳过")
+                    stop_incomplete(f"评论被限流(412)，重试 {max_ban_retries} 次仍失败")
                     break
                 wait = min(ban_retries * 30 + 10, 180)
                 if len(comments) == 0:
@@ -209,13 +229,14 @@ def fetch_comments(
                 rebuild_session()
                 continue
 
-            # 检查 Cloudflare/反爬
-            if resp.status_code == 403 or "cf-" in str(resp.headers).lower():
+            # 403 拦截（原先还按响应头里是否含 "cf-" 判断，容易误判，已去掉）
+            if resp.status_code == 403:
                 ban_retries += 1
                 consecutive_success = 0
                 if limiter:
                     limiter.record_failure()
                 if ban_retries > max_ban_retries:
+                    stop_incomplete(f"评论被拦截(403)，重试 {max_ban_retries} 次仍失败")
                     break
                 wait = ban_retries * 20
                 print(f"  评论被拦截(403)，等待 {wait}s...")
@@ -229,12 +250,16 @@ def fetch_comments(
             except Exception:
                 if len(comments) == 0:
                     print(f"  (评论区不可用: 非 JSON 响应)")
+                else:
+                    stop_incomplete(f"第 {page + 1} 页返回非 JSON 响应")
                 break
 
             if data["code"] != 0:
                 # 12002=评论区关闭, -404=无此资源，其余错误仅首页时提示
                 if len(comments) == 0 and data["code"] not in (12002, -404):
                     print(f"  评论接口报错 code={data['code']}: {data.get('message', '')}")
+                if len(comments) > 0 or data["code"] not in (12002, -404):
+                    stop_incomplete(f"评论接口报错 code={data['code']}: {data.get('message', '')}")
                 break
 
             result = data["data"]
@@ -312,6 +337,33 @@ def fetch_comments(
         client.close()
 
     return comments, total_count
+
+
+def fetch_comments_full(
+    oid: int,
+    comment_type: int = 1,
+    progress_callback=None,
+    limiter=None,
+) -> tuple[list[Comment], int, dict]:
+    """全量采集一级评论：按时间排序一直翻到最后一页
+
+    时间排序能遍历全部一级评论，全量时热度排序没有额外收益，因此只用一种排序。
+    没有采完（限流重试耗尽、中途出错）时抛出 CommentsIncomplete。
+
+    Returns:
+        (评论列表, 接口给出的评论总数（含楼中楼）, 采集信息)
+    """
+    comments, total = fetch_comments(
+        oid, comment_type=comment_type, max_pages=FULL_MAX_PAGES, sort_mode=2,
+        progress_callback=progress_callback, limiter=limiter, raise_on_incomplete=True,
+    )
+    info = {
+        "strategy": "full",
+        "collected": len(comments),
+        "reported_total": total,
+        "sub_replies": sum(c.rcount for c in comments),
+    }
+    return comments, total, info
 
 
 def fetch_comment_replies(

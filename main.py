@@ -21,7 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ranking import (
     VideoInfo, fetch_weekly_videos, fetch_weekly_series, get_latest_series_number, get_series_info,
 )
-from comments import fetch_comments, fetch_comments_maximized, check_login
+from comments import (
+    CommentsIncomplete, check_login, fetch_comments, fetch_comments_full, fetch_comments_maximized,
+)
 from danmaku import fetch_video_danmaku, danmaku_from_dict
 from stats import build_statistics, print_report, save_results
 from content_analyzer import (
@@ -38,6 +40,8 @@ from adaptive_retry import (
 
 # 评论每种排序默认最多采集的页数（每页 20 条）
 DEFAULT_COMMENT_PAGES = 100
+# 评论重采的进度文件（放在运行目录下，支持中断后继续）
+RECOLLECT_STATE_FILE = "comments_recollect.json"
 
 
 @dataclass
@@ -54,6 +58,7 @@ class VideoJob:
     no_frames: bool = False
     maximize_comments: bool = True
     comment_max_pages: int = DEFAULT_COMMENT_PAGES
+    full_comments: bool = False
     bvid: str = ""
     owner_mid: int = 0
     video_specs: dict = field(default_factory=dict)
@@ -81,15 +86,43 @@ def _warn_if_not_logged_in():
           "可运行 python bili_auth.py 自检\n")
 
 
-def _collect_comments(job: VideoJob, limiter: AdaptiveRateLimiter = None):
-    """采集评论写入 job，失败时抛出异常"""
-    aid = job.video.aid
-    if job.maximize_comments:
+def _comment_strategy(full: bool, maximize: bool, max_pages: int) -> str:
+    """评论采集策略的标识，用于判断重采时某个视频是否已按同样方式采过"""
+    if full:
+        return "full"
+    return f"{'maximized' if maximize else 'time'}:{max_pages}"
+
+
+def _page_progress_printer(every_pages: int = 50):
+    """全量采集可能翻几百上千页，每 N 页打印一次进度"""
+    start = time.time()
+    pages = 0
+
+    def callback(collected: int, total: int):
+        nonlocal pages
+        pages += 1
+        if pages % every_pages == 0:
+            print(f"    … 已翻 {pages} 页，采到 {collected} 条"
+                  f"（接口总数含楼中楼 {total}），用时 {(time.time() - start) / 60:.1f} 分钟",
+                  flush=True)
+
+    return callback
+
+
+def _fetch_video_comments(aid: int, *, full: bool, maximize: bool, max_pages: int,
+                          limiter: AdaptiveRateLimiter = None) -> tuple[list, int, dict | None]:
+    """按采集策略获取一个视频的评论，返回 (评论列表, 接口总数, 采集信息)；失败时抛出异常"""
+    if full:
+        print("  采集评论(全量，按时间排序翻到最后一页)...", flush=True)
+        comments, total, info = fetch_comments_full(
+            aid, progress_callback=_page_progress_printer(), limiter=limiter)
+        print(f"  ✓ {len(comments)} 条一级评论（接口总数含楼中楼 {total}，"
+              f"这些评论下的楼中楼 {info['sub_replies']} 条）")
+    elif maximize:
         print("  采集评论(双模式最大化)...", end=" ")
-        comments, comment_total, info = fetch_comments_maximized(
-            aid, max_pages_per_mode=job.comment_max_pages, limiter=limiter,
-        )
-        print(f"✓ {len(comments)} 条主评论 (去重后) / {comment_total} 总计")
+        comments, total, info = fetch_comments_maximized(
+            aid, max_pages_per_mode=max_pages, limiter=limiter)
+        print(f"✓ {len(comments)} 条主评论 (去重后) / {total} 总计")
         if info:
             print(f"    mode2={info['mode2_count']} "
                   f"mode3={info['mode3_count']} "
@@ -97,13 +130,18 @@ def _collect_comments(job: VideoJob, limiter: AdaptiveRateLimiter = None):
                   f"新增{info['mode3_count'] - info['overlap_count']}条")
     else:
         print("  采集评论...", end=" ")
-        comments, comment_total = fetch_comments(
-            aid, max_pages=job.comment_max_pages, limiter=limiter,
-        )
+        comments, total = fetch_comments(aid, max_pages=max_pages, limiter=limiter)
         info = None
-        print(f"✓ {len(comments)} 条主评论 / {comment_total} 总计")
-    job.comments = comments
-    job.comment_stats_info = info
+        print(f"✓ {len(comments)} 条主评论 / {total} 总计")
+    return comments, total, info
+
+
+def _collect_comments(job: VideoJob, limiter: AdaptiveRateLimiter = None):
+    """采集评论写入 job，失败时抛出异常"""
+    job.comments, _, job.comment_stats_info = _fetch_video_comments(
+        job.video.aid, full=job.full_comments, maximize=job.maximize_comments,
+        max_pages=job.comment_max_pages, limiter=limiter,
+    )
 
 
 def _danmaku_pages(job: VideoJob) -> list[tuple[int, int, int]]:
@@ -246,7 +284,8 @@ def process_video(video: VideoInfo, output_base: str, no_content: bool = False,
                   danmaku_limiter: AdaptiveRateLimiter = None,
                   retry_queue: RetryQueue = None,
                   maximize_comments: bool = True,
-                  comment_max_pages: int = DEFAULT_COMMENT_PAGES) -> VideoJob | None:
+                  comment_max_pages: int = DEFAULT_COMMENT_PAGES,
+                  full_comments: bool = False) -> VideoJob | None:
     """处理单个视频：采集评论 + 弹幕 + 统计 + 内容分析
 
     Returns:
@@ -258,6 +297,7 @@ def process_video(video: VideoInfo, output_base: str, no_content: bool = False,
         video=video, output_dir=os.path.join(output_base, dir_name), dir_name=dir_name,
         no_content=no_content, no_frames=no_frames,
         maximize_comments=maximize_comments, comment_max_pages=comment_max_pages,
+        full_comments=full_comments,
         bvid=video.bvid, owner_mid=video.owner_mid,
     )
 
@@ -494,15 +534,41 @@ def _completed_summary_entries(output_base: str, checkpoint: CheckpointManager) 
     return _load_summary_entries(output_base, videos)
 
 
+def _load_recollect_state(run_dir: str) -> dict:
+    path = os.path.join(run_dir, RECOLLECT_STATE_FILE)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_recollect_state(run_dir: str, state: dict):
+    """原子写入重采进度"""
+    path = os.path.join(run_dir, RECOLLECT_STATE_FILE)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
 def _recollect_comments_only(output_root: str, maximize: bool = True,
-                             comment_max_pages: int = DEFAULT_COMMENT_PAGES):
-    """仅重新采集最新一次运行中已完成视频的评论，更新 stats 和报告"""
+                             comment_max_pages: int = DEFAULT_COMMENT_PAGES,
+                             full: bool = False):
+    """仅重新采集最新一次运行中已完成视频的评论，更新 stats 和报告
+
+    支持中断后继续：每个视频采完就记录到运行目录的 comments_recollect.json，
+    重新运行同一命令时跳过已按相同方式（或全量）采过的视频。
+    """
     run_dir = _latest_run_dir(output_root)
     if not run_dir:
         print("错误: 找不到可用的运行目录（需包含 resume_state.json）")
         return
 
-    print(f"📋 评论重采模式: {os.path.basename(run_dir)}")
+    strategy = _comment_strategy(full, maximize, comment_max_pages)
+    print(f"📋 评论重采模式: {os.path.basename(run_dir)}（策略 {strategy}）")
     state = _load_resume_state(run_dir) or {}
     completed = [
         (int(aid), entry.get("title", ""), entry.get("output_dir", ""))
@@ -513,15 +579,25 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
         print("无已完成视频可重新采集")
         return
 
+    progress = _load_recollect_state(run_dir)
+    limiter = create_comment_limiter()
+    done, skipped, failed = 0, 0, []
     print(f"  共 {len(completed)} 个视频需要重新采集评论\n")
 
     for i, (aid, title, dir_name) in enumerate(completed, 1):
+        record = progress.get(str(aid), {})
+        if record.get("strategy") in (strategy, "full"):
+            print(f"[{i}/{len(completed)}] {title[:40]} - 已按{record['strategy']}采集过"
+                  f"（{record.get('count', 0)} 条），跳过")
+            skipped += 1
+            continue
+
         video_dir = _find_video_dir(run_dir, aid, dir_name)
         if not video_dir:
             print(f"[{i}/{len(completed)}] {title[:30]} - ⚠️ 目录不存在，跳过")
             continue
 
-        print(f"[{i}/{len(completed)}] {title[:40]}")
+        print(f"[{i}/{len(completed)}] {title[:40]}", flush=True)
 
         # 读取现有 stats
         stats_path = os.path.join(video_dir, "stats.json")
@@ -532,22 +608,20 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
         old_comment_total = stats.get("comments", {}).get("total", 0)
 
         # 重新采集评论；失败或一条没拿到时保留原数据，避免覆盖成空
-        comment_stats_info = None
         try:
-            if maximize:
-                print("  采集评论(双模式)...", end=" ")
-                comments, _, comment_stats_info = fetch_comments_maximized(
-                    aid, max_pages_per_mode=comment_max_pages)
-            else:
-                print("  采集评论...", end=" ")
-                comments, _ = fetch_comments(aid, max_pages=comment_max_pages)
+            comments, reported_total, comment_stats_info = _fetch_video_comments(
+                aid, full=full, maximize=maximize, max_pages=comment_max_pages, limiter=limiter)
         except Exception as e:
-            print(f"✗ {e}，保留原有数据")
+            print(f"  ✗ {e}，保留原有数据")
+            failed.append(title)
+            if isinstance(e, CommentsIncomplete) and i < len(completed):
+                print("  ⏱ 疑似被限流，冷却 5 分钟后继续下一个视频...", flush=True)
+                time.sleep(300)
             continue
         if not comments and old_comment_total > 0:
-            print(f"✗ 未采集到评论（原有 {old_comment_total} 条），保留原有数据")
+            print(f"  ✗ 未采集到评论（原有 {old_comment_total} 条），保留原有数据")
+            failed.append(title)
             continue
-        print(f"✓ {len(comments)} 条")
 
         # 读取现有弹幕
         danmaku_path = os.path.join(video_dir, "danmaku.json")
@@ -590,6 +664,15 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
         except Exception as e:
             print(f"  ⚠️ 报告生成失败: {e}")
 
+        progress[str(aid)] = {
+            "strategy": strategy,
+            "count": len(comments),
+            "reported_total": reported_total,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _save_recollect_state(run_dir, progress)
+        done += 1
+
         # 视频间冷却
         if i < len(completed):
             time.sleep(15)
@@ -607,7 +690,13 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
         except Exception as e:
             print(f"  ⚠️ 汇总报告失败: {e}")
 
-    print("\n✅ 评论重采完成!")
+    print(f"\n本次完成 {done} 个，之前已完成跳过 {skipped} 个，失败 {len(failed)} 个")
+    if failed:
+        print("  失败的视频保留了原有数据，重新运行同一命令会继续采集它们：")
+        for title in failed:
+            print(f"    - {title[:50]}")
+    else:
+        print("✅ 评论重采完成!")
 
 
 def _print_rankings(comparison: dict):
@@ -666,6 +755,8 @@ def main():
                         help="禁用自适应延迟（使用固定延迟）")
     parser.add_argument("--no-maximize-comments", action="store_true",
                         help="禁用双模式评论采集（仅用 mode=2）")
+    parser.add_argument("--full-comments", action="store_true",
+                        help="全量采集一级评论：按时间排序翻到最后一页（忽略 -l 和双模式），耗时很长")
     parser.add_argument("--comments-only", action="store_true",
                         help="仅重新采集已处理视频的评论（跳过弹幕/内容分析）")
     parser.add_argument("--rebuild", nargs="?", const="", default=None, metavar="RUN_DIR",
@@ -704,12 +795,14 @@ def main():
         output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
         process_video(video, output_base, args.no_content, args.no_frames,
                       maximize_comments=maximize_comments,
-                      comment_max_pages=comment_max_pages)
+                      comment_max_pages=comment_max_pages,
+                      full_comments=args.full_comments)
         return
 
     # ── 仅重新采集评论模式 ──
     if args.comments_only:
-        _recollect_comments_only(args.output, maximize_comments, comment_max_pages)
+        _recollect_comments_only(args.output, maximize_comments, comment_max_pages,
+                                 full=args.full_comments)
         return
 
     # 周热榜模式
@@ -804,6 +897,7 @@ def main():
                 retry_queue=retry_queue,
                 maximize_comments=maximize_comments,
                 comment_max_pages=comment_max_pages,
+                full_comments=args.full_comments,
             )
         except Exception as e:
             # 单个视频的意外错误不应中断整期采集：记为失败，下次运行会重新处理
@@ -878,7 +972,9 @@ def main():
         d = item["stats"].get("danmaku", {})
         cc = item["stats"].get("comment_collection", {})
         extra = ""
-        if cc:
+        if cc.get("strategy") == "full":
+            extra = f" | 评论采集: 全量 {cc.get('collected', 0)} 条"
+        elif cc:
             extra = f" | 评论采集: mode2={cc.get('mode2_count', 0)} + mode3={cc.get('mode3_count', 0)}"
         print(f"\n📺 {item['title'][:40]}")
         print(f"   评论: {c.get('total', 0)} | 弹幕: {d.get('total', 0)} | "
