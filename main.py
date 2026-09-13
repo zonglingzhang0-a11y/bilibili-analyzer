@@ -738,6 +738,26 @@ def _print_rankings(comparison: dict):
             print(f"  #{item['rank']} {item['title'][:35]} - {item['overall_score']}/100")
 
 
+class _Tee:
+    """把输出同时写到终端和日志文件"""
+
+    def __init__(self, stream, log_file):
+        self._stream = stream
+        self._log_file = log_file
+
+    def write(self, data):
+        self._stream.write(data)
+        self._log_file.write(data)
+        return len(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._log_file.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def main():
     parser = argparse.ArgumentParser(description="B站周热榜评论弹幕统计分析")
     parser.add_argument("-s", "--series", type=int, default=None,
@@ -776,7 +796,14 @@ def main():
     parser.add_argument("--rebuild", nargs="?", const="", default=None, metavar="RUN_DIR",
                         help="离线重建：用已保存的评论/弹幕重新统计并生成报告，不联网。"
                              "指定运行目录则只重建该目录，否则重建 -o 下全部")
+    parser.add_argument("--log-file", type=str, default=None, metavar="PATH",
+                        help="输出同时追加写入该日志文件（UTF-8），便于长时间运行时事后查看")
     args = parser.parse_args()
+
+    if args.log_file:
+        log_file = open(args.log_file, "a", encoding="utf-8", buffering=1)
+        sys.stdout = _Tee(sys.stdout, log_file)
+        sys.stderr = _Tee(sys.stderr, log_file)
 
     comment_max_pages = args.limit if args.limit > 0 else DEFAULT_COMMENT_PAGES
     maximize_comments = not args.no_maximize_comments

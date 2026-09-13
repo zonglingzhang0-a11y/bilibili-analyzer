@@ -283,3 +283,14 @@ def test_comments_only_pauses_after_consecutive_failures(tmp_path, monkeypatch):
     main._recollect_comments_only(str(tmp_path), full=True)
 
     assert attempts == [1, 2, 3]
+
+
+def test_tee_writes_to_terminal_and_log(tmp_path):
+    import io
+    terminal = io.StringIO()
+    log_path = tmp_path / "run.log"
+    with open(log_path, "a", encoding="utf-8", buffering=1) as log_file:
+        tee = main._Tee(terminal, log_file)
+        print("采集中 ✓", file=tee, flush=True)
+    assert terminal.getvalue() == "采集中 ✓\n"
+    assert log_path.read_text(encoding="utf-8") == "采集中 ✓\n"
