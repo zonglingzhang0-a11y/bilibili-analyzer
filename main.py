@@ -42,6 +42,8 @@ from adaptive_retry import (
 DEFAULT_COMMENT_PAGES = 100
 # 评论重采的进度文件（放在运行目录下，支持中断后继续）
 RECOLLECT_STATE_FILE = "comments_recollect.json"
+# 评论重采时连续失败这么多个视频就暂停：多半是网络或限流问题还没过去，继续只会把后面的视频都刷成失败
+MAX_CONSECUTIVE_RECOLLECT_FAILURES = 3
 
 
 @dataclass
@@ -582,6 +584,8 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
     progress = _load_recollect_state(run_dir)
     limiter = create_comment_limiter()
     done, skipped, failed = 0, 0, []
+    consecutive_failures = 0
+    paused = False
     print(f"  共 {len(completed)} 个视频需要重新采集评论\n")
 
     for i, (aid, title, dir_name) in enumerate(completed, 1):
@@ -612,16 +616,25 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
             comments, reported_total, comment_stats_info = _fetch_video_comments(
                 aid, full=full, maximize=maximize, max_pages=comment_max_pages, limiter=limiter)
         except Exception as e:
-            print(f"  ✗ {e}，保留原有数据")
+            error = f"{e}，保留原有数据"
+        else:
+            error = None
+            if not comments and old_comment_total > 0:
+                error = f"未采集到评论（原有 {old_comment_total} 条），保留原有数据"
+        if error:
+            print(f"  ✗ {error}")
             failed.append(title)
-            if isinstance(e, CommentsIncomplete) and i < len(completed):
-                print("  ⏱ 疑似被限流，冷却 5 分钟后继续下一个视频...", flush=True)
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_RECOLLECT_FAILURES:
+                print(f"\n⛔ 连续 {consecutive_failures} 个视频采集失败，可能是网络异常或被限流，已暂停。"
+                      "\n   请确认网络正常后重新运行同一命令，已完成的视频会自动跳过。", flush=True)
+                paused = True
+                break
+            if i < len(completed):
+                print("  ⏱ 冷却 5 分钟后继续下一个视频...", flush=True)
                 time.sleep(300)
             continue
-        if not comments and old_comment_total > 0:
-            print(f"  ✗ 未采集到评论（原有 {old_comment_total} 条），保留原有数据")
-            failed.append(title)
-            continue
+        consecutive_failures = 0
 
         # 读取现有弹幕
         danmaku_path = os.path.join(video_dir, "danmaku.json")
@@ -690,7 +703,8 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
         except Exception as e:
             print(f"  ⚠️ 汇总报告失败: {e}")
 
-    print(f"\n本次完成 {done} 个，之前已完成跳过 {skipped} 个，失败 {len(failed)} 个")
+    print(f"\n本次完成 {done} 个，之前已完成跳过 {skipped} 个，失败 {len(failed)} 个"
+          + ("（已暂停，未处理完）" if paused else ""))
     if failed:
         print("  失败的视频保留了原有数据，重新运行同一命令会继续采集它们：")
         for title in failed:

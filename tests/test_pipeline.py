@@ -223,3 +223,63 @@ def test_comments_only_resumes_and_skips_finished_videos(tmp_path, monkeypatch):
     stats = json.loads((run / "2_视频2" / "stats.json").read_text(encoding="utf-8"))
     assert stats["comments"]["total"] == 30
     assert stats["comment_collection"]["strategy"] == "full"
+
+
+class _FlakyNetworkClient(_FinitePagesClient):
+    """前两次请求网络出错，之后正常返回 3 页评论"""
+
+    def __init__(self, failures=2):
+        super().__init__()
+        self.failures = failures
+        self.attempts = 0
+
+    def get(self, url, params=None):
+        import httpx
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred")
+        return super().get(url, params)
+
+
+def test_network_errors_retry_the_same_page(monkeypatch):
+    client = _FlakyNetworkClient(failures=2)
+    _patch_comment_session(monkeypatch, client)
+
+    result, total, info = comments.fetch_comments_full(1)
+
+    assert len(result) == 60 and client.attempts == 5
+
+
+def test_persistent_network_errors_are_incomplete(monkeypatch):
+    import httpx
+    client = _FlakyNetworkClient(failures=100)
+    _patch_comment_session(monkeypatch, client)
+
+    with pytest.raises(comments.CommentsIncomplete):
+        comments.fetch_comments_full(1)
+    assert client.attempts == comments.MAX_NETWORK_RETRIES + 1
+    with pytest.raises(httpx.ConnectError):  # 非全量模式保持原行为：抛出原始异常
+        comments.fetch_comments(1, max_pages=5)
+
+
+def test_comments_only_pauses_after_consecutive_failures(tmp_path, monkeypatch):
+    run = tmp_path / "20260913_000000"
+    run.mkdir()
+    videos = {}
+    for aid in range(1, 6):
+        (run / f"{aid}_v").mkdir()
+        (run / f"{aid}_v" / "stats.json").write_text(json.dumps({"owner_mid": 7}), encoding="utf-8")
+        videos[str(aid)] = {"aid": aid, "title": f"v{aid}", "state": "completed", "output_dir": f"{aid}_v"}
+    (run / "resume_state.json").write_text(json.dumps({"total_videos": 5, "videos": videos}),
+                                           encoding="utf-8")
+    attempts = []
+
+    def failing_full(aid, progress_callback=None, limiter=None):
+        attempts.append(aid)
+        raise comments.CommentsIncomplete("网络连续出错", 0)
+
+    monkeypatch.setattr(main, "fetch_comments_full", failing_full)
+
+    main._recollect_comments_only(str(tmp_path), full=True)
+
+    assert attempts == [1, 2, 3]

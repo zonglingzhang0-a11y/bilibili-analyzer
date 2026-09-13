@@ -42,6 +42,8 @@ class Comment:
 
 # 全量采集时的翻页上限（每页 20 条，足够覆盖任何视频），只作为防止死循环的保护
 FULL_MAX_PAGES = 100_000
+# 网络出错（超时、SSL 断连等）时同一页的最大重试次数，等待 15s 起翻倍、最长 240s，合计约 12 分钟
+MAX_NETWORK_RETRIES = 6
 
 
 class CommentsIncomplete(RuntimeError):
@@ -183,6 +185,7 @@ def fetch_comments(
     total_count = 0
     ban_retries = 0
     max_ban_retries = 8
+    network_retries = 0
     consecutive_success = 0
     page_delay = 3.0
     cursor_next = 0  # cursor 分页游标，0 表示第一页
@@ -209,7 +212,21 @@ def fetch_comments(
             if cursor_next > 0:
                 params["next"] = cursor_next
 
-            resp = client.get(url, params=_try_sign_params(params))
+            # 网络层错误（超时、SSL 断连、连接重置）：等待后重试同一页，保留已采到的进度
+            try:
+                resp = client.get(url, params=_try_sign_params(params))
+            except httpx.TransportError as e:
+                network_retries += 1
+                if network_retries > MAX_NETWORK_RETRIES:
+                    stop_incomplete(f"网络连续出错 {MAX_NETWORK_RETRIES} 次仍未恢复: {e}")
+                    raise
+                wait = min(15 * 2 ** (network_retries - 1), 240)
+                print(f"  网络出错（{type(e).__name__}），{wait}s 后重试第 {network_retries} 次"
+                      f"（已采 {len(comments)} 条）...", flush=True)
+                time.sleep(wait)
+                rebuild_session()
+                continue
+            network_retries = 0
 
             # 412 反爬 → 指数退避
             if resp.status_code == 412:
