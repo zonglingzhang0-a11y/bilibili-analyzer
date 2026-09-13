@@ -230,6 +230,16 @@ def _analyze_and_save(job: VideoJob, checkpoint: CheckpointManager = None):
             checkpoint.mark_video_complete(video.aid, job.dir_name, stats_summary, video.title)
 
 
+def _video_dir_name(aid: int, title: str) -> str:
+    """视频输出目录名 {aid}_{标题}：只保留安全字符并截断
+
+    去掉末尾的空格和点：Windows 创建目录时会静默删除它们，导致之后按原名写文件时
+    找不到目录（例如标题「⚡️ 嘉 豪 の 小 曲 ⚡️」去掉表情后末尾会剩下空格）。
+    """
+    safe_title = "".join(c for c in title if c.isalnum() or c in " _-（）()【】")[:40]
+    return f"{aid}_{safe_title.rstrip(' .')}"
+
+
 def process_video(video: VideoInfo, output_base: str, no_content: bool = False,
                   no_frames: bool = False, checkpoint: CheckpointManager = None,
                   comment_limiter: AdaptiveRateLimiter = None,
@@ -243,8 +253,7 @@ def process_video(video: VideoInfo, output_base: str, no_content: bool = False,
         VideoJob（可能带有 failures，失败项已加入 retry_queue）；完全无数据时返回 None
     """
     # 清理文件名
-    safe_title = "".join(c for c in video.title if c.isalnum() or c in " _-（）()【】")[:40]
-    dir_name = f"{video.aid}_{safe_title}"
+    dir_name = _video_dir_name(video.aid, video.title)
     job = VideoJob(
         video=video, output_dir=os.path.join(output_base, dir_name), dir_name=dir_name,
         no_content=no_content, no_frames=no_frames,
@@ -455,6 +464,36 @@ def _find_video_dir(run_dir: str, aid: int, dir_name: str = "") -> str | None:
     return None
 
 
+def _load_summary_entries(run_dir: str, videos: list[tuple[int, str, str]]) -> list[dict]:
+    """从磁盘读取视频的 stats.json，组装汇总条目
+
+    Args:
+        videos: [(aid, 标题, 清单记录的目录名)]
+    """
+    entries = []
+    for aid, title, dir_name in videos:
+        video_dir = _find_video_dir(run_dir, aid, dir_name)
+        stats_path = os.path.join(video_dir, "stats.json") if video_dir else ""
+        if not (stats_path and os.path.isfile(stats_path)):
+            continue
+        with open(stats_path, "r", encoding="utf-8") as f:
+            video_stats = json.load(f)
+        info = video_stats.get("video_info", {})
+        entries.append({
+            "aid": aid, "title": title or info.get("title", ""),
+            "views": info.get("view", 0), "likes": info.get("like", 0),
+            "stats": video_stats,
+        })
+    return entries
+
+
+def _completed_summary_entries(output_base: str, checkpoint: CheckpointManager) -> list[dict]:
+    """运行目录中所有已完成视频的汇总条目（断点续传时包含之前运行完成的视频）"""
+    videos = [(e["aid"], e.get("title", ""), e.get("output_dir", ""))
+              for e in checkpoint.get_completed_entries()]
+    return _load_summary_entries(output_base, videos)
+
+
 def _recollect_comments_only(output_root: str, maximize: bool = True,
                              comment_max_pages: int = DEFAULT_COMMENT_PAGES):
     """仅重新采集最新一次运行中已完成视频的评论，更新 stats 和报告"""
@@ -557,19 +596,7 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
 
     # 重新生成汇总
     print("\n重新生成汇总报告...")
-    all_stats_objs = []
-    for aid, title, dir_name in completed:
-        video_dir = _find_video_dir(run_dir, aid, dir_name)
-        stats_path = os.path.join(video_dir, "stats.json") if video_dir else ""
-        if stats_path and os.path.isfile(stats_path):
-            with open(stats_path, "r", encoding="utf-8") as f:
-                video_stats = json.load(f)
-            info = video_stats.get("video_info", {})
-            all_stats_objs.append({
-                "aid": aid, "title": title,
-                "views": info.get("view", 0), "likes": info.get("like", 0),
-                "stats": video_stats,
-            })
+    all_stats_objs = _load_summary_entries(run_dir, completed)
 
     if len(all_stats_objs) >= 2:
         series_num = state.get("series_number")
@@ -768,15 +795,22 @@ def main():
             p = checkpoint.get_progress()
             progress = f" (总进度 {p['completed']}/{p['total']})"
         print(f"[{i}/{len(videos)}]{progress}", end="")
-        job = process_video(
-            v, output_base, args.no_content, args.no_frames,
-            checkpoint=checkpoint,
-            comment_limiter=comment_limiter,
-            danmaku_limiter=danmaku_limiter,
-            retry_queue=retry_queue,
-            maximize_comments=maximize_comments,
-            comment_max_pages=comment_max_pages,
-        )
+        try:
+            job = process_video(
+                v, output_base, args.no_content, args.no_frames,
+                checkpoint=checkpoint,
+                comment_limiter=comment_limiter,
+                danmaku_limiter=danmaku_limiter,
+                retry_queue=retry_queue,
+                maximize_comments=maximize_comments,
+                comment_max_pages=comment_max_pages,
+            )
+        except Exception as e:
+            # 单个视频的意外错误不应中断整期采集：记为失败，下次运行会重新处理
+            job = None
+            print(f"\n  ✗ 处理视频时出现意外错误，已跳过: {e!r}")
+            if checkpoint:
+                checkpoint.mark_video_failed(v.aid, f"意外错误: {e!r}", v.title)
         if job:
             all_stats.append(_summary_entry(job))
 
@@ -799,6 +833,10 @@ def main():
     # ── 重试失败项 ──
     _retry_failed(retry_queue, all_stats, checkpoint,
                   comment_limiter, danmaku_limiter, inter_video_limiter)
+
+    # 断点续传时，汇总应覆盖整个运行目录中已完成的视频，而不只是本次新处理的
+    if checkpoint:
+        all_stats = _completed_summary_entries(output_base, checkpoint)
 
     # ── MCP 清单生成 ──
     if not args.no_content and all_stats:

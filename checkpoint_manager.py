@@ -215,6 +215,13 @@ class CheckpointManager:
             "percent": round(completed / total * 100, 1) if total > 0 else 0,
         }
 
+    def get_completed_entries(self) -> list[dict]:
+        """获取所有已完成视频的清单条目（含 aid、title、output_dir）"""
+        return [
+            dict(entry) for entry in self._state["videos"].values()
+            if entry["state"] == "completed" and entry.get("aid")
+        ]
+
     def get_completed_aids(self) -> set[int]:
         """获取所有已完成的 aid 集合"""
         aids = set()
