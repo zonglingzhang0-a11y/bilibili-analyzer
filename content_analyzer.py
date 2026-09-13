@@ -6,24 +6,12 @@
 import os
 import struct
 import json
-import time
 from datetime import datetime
-import httpx
-from dataclasses import dataclass, asdict
 from io import BytesIO
 
-from ranking import VideoInfo
+from bili_http import make_client
+from wbi import get_signer
 
-BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.bilibili.com",
-}
-
-try:
-    from .wbi import get_signer
-except ImportError:
-    from wbi import get_signer
 
 try:
     from PIL import Image
@@ -39,15 +27,17 @@ def fetch_hardware_params(aid: int) -> dict:
         "https://api.bilibili.com/x/web-interface/view",
         params={"aid": aid},
     )
-    if resp.json().get("code") != 0:
+    payload = resp.json()
+    if payload.get("code") != 0:
         return {}
 
-    d = resp.json()["data"]
+    d = payload["data"]
     dim = d.get("dimension", {})
     pages = d.get("pages", [])
 
     result = {
         "bvid": d.get("bvid", ""),
+        "owner_mid": d.get("owner", {}).get("mid", 0),
         "width": dim.get("width", 0),
         "height": dim.get("height", 0),
         "duration_seconds": d.get("duration", 0),
@@ -90,8 +80,8 @@ def download_cover(pic_url: str, output_path: str) -> str | None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     try:
-        client = httpx.Client(headers=BASE_HEADERS, timeout=30, trust_env=False)
-        resp = client.get(pic_url)
+        with make_client(timeout=30) as client:
+            resp = client.get(pic_url)
         if resp.status_code == 200 and len(resp.content) > 100:
             with open(output_path, "wb") as f:
                 f.write(resp.content)
@@ -118,10 +108,11 @@ def _get_videoshot_info(aid: int, cid: int) -> dict | None:
         "https://api.bilibili.com/x/player/videoshot",
         params={"aid": aid, "cid": cid},
     )
-    if resp.json().get("code") != 0:
+    payload = resp.json()
+    if payload.get("code") != 0:
         return None
 
-    d = resp.json()["data"]
+    d = payload["data"]
     images = ["https:" + url for url in d.get("image", [])]
     if not images:
         return None
@@ -141,8 +132,8 @@ def _get_videoshot_info(aid: int, cid: int) -> dict | None:
     if pvdata:
         pvdata_url = "https:" + pvdata
         try:
-            client = httpx.Client(headers=BASE_HEADERS, timeout=15, trust_env=False)
-            bin_resp = client.get(pvdata_url)
+            with make_client() as client:
+                bin_resp = client.get(pvdata_url)
             if bin_resp.status_code == 200 and len(bin_resp.content) >= 4:
                 raw = bin_resp.content
                 # pvdata 格式: 前 4 字节为头部，之后为 uint16 BE 数组（shot index × 8）
@@ -167,6 +158,7 @@ def capture_frames(
     cid: int = 0,
     aid: int = 0,
     duration_seconds: int = 0,
+    time_offset_ms: int = 0,
 ) -> list[dict]:
     """用 B站 videoshot 精灵图 API 截取关键帧缩略图
 
@@ -177,6 +169,8 @@ def capture_frames(
         cid: 分P cid
         aid: 视频 aid
         duration_seconds: 视频时长（秒），用于估算缩略图时间位置
+        time_offset_ms: 该分P在整体时间轴上的起点；多P视频的高潮时间是拼接后的时间，
+            需减去偏移量才是该分P内的时间
 
     Returns:
         [{"timestamp_info": ..., "frame_path": "xxx.jpg"}, ...]
@@ -200,8 +194,8 @@ def capture_frames(
     shots_per_sheet = x_len * y_len
     exact_timestamps = info.get("timestamps", [])
 
-    client = httpx.Client(headers=BASE_HEADERS, timeout=60, trust_env=False)
     results = []
+    sprite_cache: dict[int, bytes] = {}  # 多个高潮点常落在同一张精灵图上
 
     # 如果已知精确毫秒时间戳，从 pvdata 映射；否则按等距估算
     if exact_timestamps and duration_seconds > 0:
@@ -218,63 +212,66 @@ def capture_frames(
             for i in range(total_shots)
         ] if duration_seconds > 0 else []
 
-    for ts_info in timestamps:
-        time_str = ts_info["time"]  # "MM:SS" 格式
-        safe_time = time_str.replace(":", "m") + "s"
-        frame_path = os.path.join(output_dir, f"frame_{safe_time}.jpg")
+    with make_client(timeout=60) as client:
+        for ts_info in timestamps:
+            time_str = ts_info["time"]  # "MM:SS" 格式
+            safe_time = time_str.replace(":", "m") + "s"
+            frame_path = os.path.join(output_dir, f"frame_{safe_time}.jpg")
 
-        # 如果已经截过就跳过
-        if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
-            results.append({"timestamp_info": ts_info, "frame_path": frame_path})
-            continue
-
-        try:
-            # 转换目标时间 → 毫秒
-            parts = time_str.split(":")
-            target_ms = (int(parts[0]) * 60 + int(parts[1])) * 1000
-
-            # 查找最接近的缩略图索引
-            shot_idx = 0
-            if all_stamps_ms:
-                shot_idx = min(range(len(all_stamps_ms)),
-                              key=lambda i: abs(all_stamps_ms[i] - target_ms))
-
-            # 确定在哪个精灵图的哪个位置
-            sheet_idx = shot_idx // shots_per_sheet
-            pos_in_sheet = shot_idx % shots_per_sheet
-            col = pos_in_sheet % x_len
-            row = pos_in_sheet // x_len
-
-            if sheet_idx >= len(images):
-                continue
-
-            # 下载精灵图
-            sprite_url = images[sheet_idx]
-            img_resp = client.get(sprite_url)
-            if img_resp.status_code != 200:
-                continue
-
-            # 裁剪缩略图
-            if HAS_PIL:
-                img = Image.open(BytesIO(img_resp.content))
-                left = col * x_size
-                top = row * y_size
-                right = left + x_size
-                bottom = top + y_size
-                cropped = img.crop((left, top, right, bottom))
-                cropped.save(frame_path, "JPEG", quality=85)
-            else:
-                # 无 PIL 时直接保存原精灵图
-                with open(frame_path, "wb") as f:
-                    f.write(img_resp.content)
-
+            # 如果已经截过就跳过
             if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
                 results.append({"timestamp_info": ts_info, "frame_path": frame_path})
-            else:
-                print(f"    截帧失败 {time_str}: 文件为空")
+                continue
 
-        except Exception as e:
-            print(f"    截帧异常 {time_str}: {e}")
+            try:
+                # 转换目标时间 → 毫秒
+                parts = time_str.split(":")
+                target_ms = (int(parts[0]) * 60 + int(parts[1])) * 1000 - time_offset_ms
+
+                # 查找最接近的缩略图索引
+                shot_idx = 0
+                if all_stamps_ms:
+                    shot_idx = min(range(len(all_stamps_ms)),
+                                  key=lambda i: abs(all_stamps_ms[i] - target_ms))
+
+                # 确定在哪个精灵图的哪个位置
+                sheet_idx = shot_idx // shots_per_sheet
+                pos_in_sheet = shot_idx % shots_per_sheet
+                col = pos_in_sheet % x_len
+                row = pos_in_sheet // x_len
+
+                if sheet_idx >= len(images):
+                    continue
+
+                # 下载精灵图（带缓存）
+                if sheet_idx not in sprite_cache:
+                    img_resp = client.get(images[sheet_idx])
+                    if img_resp.status_code != 200:
+                        continue
+                    sprite_cache[sheet_idx] = img_resp.content
+                sprite_bytes = sprite_cache[sheet_idx]
+
+                # 裁剪缩略图
+                if HAS_PIL:
+                    img = Image.open(BytesIO(sprite_bytes))
+                    left = col * x_size
+                    top = row * y_size
+                    right = left + x_size
+                    bottom = top + y_size
+                    cropped = img.crop((left, top, right, bottom))
+                    cropped.save(frame_path, "JPEG", quality=85)
+                else:
+                    # 无 PIL 时直接保存原精灵图
+                    with open(frame_path, "wb") as f:
+                        f.write(sprite_bytes)
+
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                    results.append({"timestamp_info": ts_info, "frame_path": frame_path})
+                else:
+                    print(f"    截帧失败 {time_str}: 文件为空")
+
+            except Exception as e:
+                print(f"    截帧异常 {time_str}: {e}")
 
     return results
 

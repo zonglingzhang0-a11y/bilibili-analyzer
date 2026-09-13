@@ -1,0 +1,4 @@
+# 统一使用 LF 换行，避免 Windows 下 core.autocrlf 反复提示 CRLF 转换
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -3,25 +3,14 @@ B站评论采集模块
 使用 pn/ps 分页，20条/页
 使用完整浏览器 headers + Cookie 会话避免 412 封禁
 """
-import os
 import time
-import httpx
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
+from datetime import datetime
 
-# 完整浏览器 headers，模拟正常访问
-BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Origin": "https://www.bilibili.com",
-    "Referer": "https://www.bilibili.com/",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-    "Connection": "keep-alive",
-}
+import httpx
+
+from bili_auth import DEFAULT_SESSDATA_FILE, load_sessdata
+from bili_http import BROWSER_HEADERS, make_client
 
 
 @dataclass
@@ -48,12 +37,54 @@ class Comment:
     like: int
     rcount: int
     replies: list[CommentReply] = field(default_factory=list)
+    up_replied: bool = False  # 接口 up_action.reply：UP主是否回复过该评论
+
+
+def _parse_ctime(value) -> int:
+    """comments.json 中的 ctime 是 ISO 时间字符串（空串表示未知），还原为时间戳"""
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value).timestamp()) if value else 0
+        except ValueError:
+            return 0
+    return int(value or 0)
+
+
+def comment_from_dict(d: dict, oid: int = 0) -> Comment:
+    """从 save_results 写出的 comments.json 条目还原 Comment
+
+    兼容旧格式：旧版本没有保存 mid / up_replied / 子回复的 rpid、mid、ctime，缺失时取默认值。
+    """
+    rpid = d.get("rpid", 0)
+    return Comment(
+        rpid=rpid,
+        oid=d.get("oid", oid),
+        mid=d.get("mid", 0),
+        member_name=d.get("member_name", ""),
+        content=d.get("content", ""),
+        ctime=_parse_ctime(d.get("ctime")),
+        like=d.get("like", 0),
+        rcount=d.get("rcount", 0),
+        replies=[
+            CommentReply(
+                rpid=r.get("rpid", 0),
+                mid=r.get("mid", 0),
+                member_name=r.get("member_name", ""),
+                content=r.get("content", ""),
+                ctime=_parse_ctime(r.get("ctime")),
+                like=r.get("like", 0),
+                parent_rpid=rpid,
+            )
+            for r in d.get("replies") or []
+            if isinstance(r, dict)
+        ],
+        up_replied=bool(d.get("up_replied", False)),
+    )
 
 
 def _build_session() -> httpx.Client:
     """创建带 Cookie 的 httpx 会话，模拟正常浏览器访问"""
-    client = httpx.Client(headers=BASE_HEADERS, timeout=20, trust_env=False,
-                          follow_redirects=True)
+    client = make_client(BROWSER_HEADERS, timeout=20, follow_redirects=True)
 
     # 先访问 B站首页获取初始 Cookie
     try:
@@ -61,18 +92,10 @@ def _build_session() -> httpx.Client:
     except Exception:
         pass
 
-    # 尝试读取保存的登录 Cookie（.sessdata 文件）
-    sessdata_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ".sessdata"
-    )
-    if os.path.isfile(sessdata_path):
-        try:
-            with open(sessdata_path, "r", encoding="utf-8") as f:
-                sessdata = f.read().strip()
-            if sessdata:
-                client.cookies.set("SESSDATA", sessdata, domain=".bilibili.com")
-        except Exception:
-            pass
+    # 读取登录 Cookie：优先环境变量 BILI_SESSDATA，回退项目根目录 .sessdata 文件
+    sessdata = load_sessdata(DEFAULT_SESSDATA_FILE, required=False)
+    if sessdata:
+        client.cookies.set("SESSDATA", sessdata, domain=".bilibili.com")
 
     # 确保有 buvid3（B站设备标识）
     if "buvid3" not in client.cookies:
@@ -81,13 +104,34 @@ def _build_session() -> httpx.Client:
     return client
 
 
+def check_login() -> bool | None:
+    """检查配置的 SESSDATA 是否仍处于登录状态
+
+    未登录会话（包括 SESSDATA 过期）调用评论接口时，每种排序总共只返回约 3 条评论。
+
+    Returns:
+        True 已登录；False 配置了 SESSDATA 但未登录（已失效）；None 未配置或检查失败
+    """
+    if not load_sessdata(DEFAULT_SESSDATA_FILE, required=False):
+        return None
+    # _build_session 内部已发过请求，不能再用 with 打开，手动关闭
+    client = _build_session()
+    try:
+        data = client.get("https://api.bilibili.com/x/web-interface/nav").json()
+        return bool((data.get("data") or {}).get("isLogin"))
+    except Exception:
+        return None
+    finally:
+        client.close()
+
+
 def _try_sign_params(params: dict) -> dict:
     """尝试对评论请求参数进行 WBI 签名"""
     try:
         from wbi import get_signer
-        signer = get_signer()
-        return signer.signed_get_params(params)
+        return get_signer().sign(params)
     except Exception:
+        # 获取签名 key 失败时退回未签名请求（该接口不强制要求签名）
         return params
 
 
@@ -97,10 +141,11 @@ def fetch_comments(
     max_pages: int = 100,
     sort_mode: int = 2,
     progress_callback=None,
+    limiter=None,
 ) -> tuple[list[Comment], int]:
     """采集视频评论
 
-    使用浏览器 headers + Cookie 会话 + WBI 签名尝试，
+    使用浏览器 headers + Cookie 会话 + WBI 签名，
     减少 412 限流概率。
 
     Args:
@@ -109,14 +154,16 @@ def fetch_comments(
         max_pages: 最大页数（默认 100）
         sort_mode: 排序模式 (2=时间倒序, 3=热度排序)
         progress_callback: 进度回调 (collected_count, total_count)
+        limiter: 可选的 AdaptiveRateLimiter，提供时由它控制页间延迟
 
     Returns:
         (评论列表, 总评论数)
     """
-    client = _build_session()
     url = "https://api.bilibili.com/x/v2/reply/main"
+    client = _build_session()
 
     comments: list[Comment] = []
+    seen_rpids: set[int] = set()
     page = 0
     total_count = 0
     ban_retries = 0
@@ -125,126 +172,144 @@ def fetch_comments(
     page_delay = 3.0
     cursor_next = 0  # cursor 分页游标，0 表示第一页
 
-    while page < max_pages:
-        params = {
-            "oid": oid,
-            "type": comment_type,
-            "mode": sort_mode,
-            "ps": 20,
-        }
-        # cursor 分页：B站用 'next' 参数传 cursor 值
-        if cursor_next > 0:
-            params["pn"] = 1
-            params["next"] = cursor_next
-        else:
-            params["pn"] = 1
+    def rebuild_session():
+        nonlocal client
+        client.close()
+        client = _build_session()
 
-        signed_params = _try_sign_params(params)
+    try:
+        while page < max_pages:
+            params = {
+                "oid": oid,
+                "type": comment_type,
+                "mode": sort_mode,
+                "ps": 20,
+                "pn": 1,
+            }
+            # cursor 分页：B站用 'next' 参数传 cursor 值
+            if cursor_next > 0:
+                params["next"] = cursor_next
 
-        resp = client.get(url, params=signed_params)
+            resp = client.get(url, params=_try_sign_params(params))
 
-        # 412 反爬 → 指数退避
-        if resp.status_code == 412:
-            ban_retries += 1
-            consecutive_success = 0
-            if ban_retries > max_ban_retries:
-                if len(comments) == 0:
-                    print(f"  评论被限流(412)，已重试{ban_retries}次仍失败，跳过")
-                break
-            wait = min(ban_retries * 30 + 10, 180)
-            if len(comments) == 0:
-                print(f"  评论限流(412)，等待 {wait}s (第{ban_retries}次)...")
-            time.sleep(wait)
-            client = _build_session()
-            continue
-        ban_retries = 0
-
-        # 检查 Cloudflare/反爬
-        if resp.status_code == 403 or "cf-" in str(resp.headers).lower():
-            ban_retries += 1
-            consecutive_success = 0
-            if ban_retries > max_ban_retries:
-                break
-            wait = ban_retries * 20
-            print(f"  评论被拦截(403)，等待 {wait}s...")
-            time.sleep(wait)
-            client = _build_session()
-            continue
-
-        try:
-            data = resp.json()
-        except Exception:
-            if len(comments) == 0:
-                print(f"  (评论区不可用: 非 JSON 响应)")
-            break
-
-        if data["code"] != 0:
-            if data["code"] == 12002:
-                break
-            if data["code"] == -404:
-                break
-            if len(comments) == 0:
-                print(f"  评论接口报错 code={data['code']}: {data.get('message', '')}")
-                if data["code"] in (-352, -400):
+            # 412 反爬 → 指数退避
+            if resp.status_code == 412:
+                ban_retries += 1
+                consecutive_success = 0
+                if limiter:
+                    limiter.record_failure()
+                if ban_retries > max_ban_retries:
+                    if len(comments) == 0:
+                        print(f"  评论被限流(412)，已重试{ban_retries}次仍失败，跳过")
                     break
-            break
+                wait = min(ban_retries * 30 + 10, 180)
+                if len(comments) == 0:
+                    print(f"  评论限流(412)，等待 {wait}s (第{ban_retries}次)...")
+                time.sleep(wait)
+                rebuild_session()
+                continue
 
-        result = data["data"]
-        if total_count == 0:
-            total_count = (result.get("page", {}).get("count", 0) or
-                          result.get("cursor", {}).get("all_count", 0))
+            # 检查 Cloudflare/反爬
+            if resp.status_code == 403 or "cf-" in str(resp.headers).lower():
+                ban_retries += 1
+                consecutive_success = 0
+                if limiter:
+                    limiter.record_failure()
+                if ban_retries > max_ban_retries:
+                    break
+                wait = ban_retries * 20
+                print(f"  评论被拦截(403)，等待 {wait}s...")
+                time.sleep(wait)
+                rebuild_session()
+                continue
+            ban_retries = 0
 
-        replies_list = result.get("replies") or []
-        if not replies_list:
-            break
-
-        for item in replies_list:
-            sub_replies = []
-            for sub in item.get("replies") or []:
-                sub_replies.append(CommentReply(
-                    rpid=sub["rpid"],
-                    mid=sub["mid"],
-                    member_name=sub["member"]["uname"],
-                    content=sub["content"]["message"],
-                    ctime=sub["ctime"],
-                    like=sub["like"],
-                    parent_rpid=item["rpid"],
-                ))
-            comments.append(Comment(
-                rpid=item["rpid"],
-                oid=item["oid"],
-                mid=item["mid"],
-                member_name=item["member"]["uname"],
-                content=item["content"]["message"],
-                ctime=item["ctime"],
-                like=item["like"],
-                rcount=item["rcount"],
-                replies=sub_replies,
-            ))
-
-        page += 1
-        consecutive_success += 1
-
-        if progress_callback:
-            progress_callback(len(comments), total_count)
-
-        # 检查 cursor 是否到达末尾
-        cursor_info = result.get("cursor", {})
-        if cursor_info.get("is_end") and cursor_info.get("is_begin"):
-            # 特殊：有些模式只有第一页
-            if len(replies_list) < 20:
+            try:
+                data = resp.json()
+            except Exception:
+                if len(comments) == 0:
+                    print(f"  (评论区不可用: 非 JSON 响应)")
                 break
 
-        # 获取下一页 cursor
-        new_cursor = cursor_info.get("next", 0)
-        if new_cursor == 0 or new_cursor == cursor_next:
-            break
-        cursor_next = new_cursor
+            if data["code"] != 0:
+                # 12002=评论区关闭, -404=无此资源，其余错误仅首页时提示
+                if len(comments) == 0 and data["code"] not in (12002, -404):
+                    print(f"  评论接口报错 code={data['code']}: {data.get('message', '')}")
+                break
 
-        # 自适应页间延迟
-        if consecutive_success > 5:
-            page_delay = max(2.0, page_delay * 0.9)
-        time.sleep(page_delay)
+            result = data["data"]
+            if total_count == 0:
+                total_count = (result.get("page", {}).get("count", 0) or
+                              result.get("cursor", {}).get("all_count", 0))
+
+            replies_list = result.get("replies") or []
+            if not replies_list:
+                break
+
+            new_count = 0
+            for item in replies_list:
+                if item["rpid"] in seen_rpids:
+                    continue
+                seen_rpids.add(item["rpid"])
+                new_count += 1
+                sub_replies = []
+                for sub in item.get("replies") or []:
+                    sub_replies.append(CommentReply(
+                        rpid=sub["rpid"],
+                        mid=sub["mid"],
+                        member_name=sub["member"]["uname"],
+                        content=sub["content"]["message"],
+                        ctime=sub["ctime"],
+                        like=sub["like"],
+                        parent_rpid=item["rpid"],
+                    ))
+                comments.append(Comment(
+                    rpid=item["rpid"],
+                    oid=item["oid"],
+                    mid=item["mid"],
+                    member_name=item["member"]["uname"],
+                    content=item["content"]["message"],
+                    ctime=item["ctime"],
+                    like=item["like"],
+                    rcount=item["rcount"],
+                    replies=sub_replies,
+                    up_replied=bool((item.get("up_action") or {}).get("reply")),
+                ))
+
+            # 整页都是已采集过的评论：接口没有按游标翻页，继续请求只会得到重复数据
+            if new_count == 0:
+                break
+
+            page += 1
+            consecutive_success += 1
+            if limiter:
+                limiter.record_success()
+
+            if progress_callback:
+                progress_callback(len(comments), total_count)
+
+            # 检查 cursor 是否到达末尾
+            cursor_info = result.get("cursor", {})
+            if cursor_info.get("is_end") and cursor_info.get("is_begin"):
+                # 特殊：有些模式只有第一页
+                if len(replies_list) < 20:
+                    break
+
+            # 获取下一页 cursor
+            new_cursor = cursor_info.get("next", 0)
+            if new_cursor == 0 or new_cursor == cursor_next:
+                break
+            cursor_next = new_cursor
+
+            # 页间延迟：有限流器时交给它，否则使用内置的简单衰减
+            if limiter:
+                limiter.wait()
+            else:
+                if consecutive_success > 5:
+                    page_delay = max(2.0, page_delay * 0.9)
+                time.sleep(page_delay)
+    finally:
+        client.close()
 
     return comments, total_count
 
@@ -256,41 +321,41 @@ def fetch_comment_replies(
     max_pages: int = 10,
 ) -> list[CommentReply]:
     """采集某条主评论下的全部子回复"""
-    client = httpx.Client(headers=BASE_HEADERS, timeout=15, trust_env=False)
     replies: list[CommentReply] = []
     page = 0
 
-    while page < max_pages:
-        resp = client.get(
-            "https://api.bilibili.com/x/v2/reply/reply",
-            params={
-                "oid": oid,
-                "type": comment_type,
-                "root": root_rpid,
-                "pn": page + 1,
-                "ps": 20,
-            },
-        )
-        data = resp.json()
-        if data["code"] != 0:
-            break
+    with make_client(BROWSER_HEADERS) as client:
+        while page < max_pages:
+            resp = client.get(
+                "https://api.bilibili.com/x/v2/reply/reply",
+                params={
+                    "oid": oid,
+                    "type": comment_type,
+                    "root": root_rpid,
+                    "pn": page + 1,
+                    "ps": 20,
+                },
+            )
+            data = resp.json()
+            if data["code"] != 0:
+                break
 
-        items = data["data"].get("replies") or []
-        for item in items:
-            replies.append(CommentReply(
-                rpid=item["rpid"],
-                mid=item["mid"],
-                member_name=item["member"]["uname"],
-                content=item["content"]["message"],
-                ctime=item["ctime"],
-                like=item["like"],
-                parent_rpid=root_rpid,
-            ))
+            items = data["data"].get("replies") or []
+            for item in items:
+                replies.append(CommentReply(
+                    rpid=item["rpid"],
+                    mid=item["mid"],
+                    member_name=item["member"]["uname"],
+                    content=item["content"]["message"],
+                    ctime=item["ctime"],
+                    like=item["like"],
+                    parent_rpid=root_rpid,
+                ))
 
-        if len(items) < 20:
-            break
-        page += 1
-        time.sleep(0.6)
+            if len(items) < 20:
+                break
+            page += 1
+            time.sleep(0.6)
 
     return replies
 
@@ -304,24 +369,16 @@ def _dedup_comments(list_a: list[Comment], list_b: list[Comment]) -> list[Commen
     """
     merged: dict[int, Comment] = {}
 
-    for c in list_a:
-        if c.rpid in merged:
-            existing = merged[c.rpid]
-            # 保留 rcount 更大、回复更多的版本
-            if (c.rcount > existing.rcount or
-                len(c.replies) > len(existing.replies)):
-                merged[c.rpid] = c
-        else:
+    for c in (*list_a, *list_b):
+        existing = merged.get(c.rpid)
+        if existing is None:
             merged[c.rpid] = c
-
-    for c in list_b:
-        if c.rpid in merged:
-            existing = merged[c.rpid]
-            if (c.rcount > existing.rcount or
-                len(c.replies) > len(existing.replies)):
-                merged[c.rpid] = c
-        else:
+            continue
+        up_replied = existing.up_replied or c.up_replied
+        # 保留 rcount 更大、回复更多的版本
+        if c.rcount > existing.rcount or len(c.replies) > len(existing.replies):
             merged[c.rpid] = c
+        merged[c.rpid].up_replied = up_replied
 
     # 按 ctime 降序排列（最新在前）
     result = sorted(merged.values(), key=lambda x: x.ctime, reverse=True)
@@ -333,6 +390,7 @@ def fetch_comments_maximized(
     comment_type: int = 1,
     max_pages_per_mode: int = 100,
     progress_callback=None,
+    limiter=None,
 ) -> tuple[list[Comment], int, dict]:
     """最大化评论采集：双模式 + 去重
 
@@ -344,6 +402,7 @@ def fetch_comments_maximized(
         comment_type: 评论区类型 (1=视频)
         max_pages_per_mode: 每种模式的最大页数
         progress_callback: 进度回调 (collected, total, phase)
+        limiter: 可选的 AdaptiveRateLimiter，控制页间延迟
 
     Returns:
         (合并去重后的评论列表, 去重后总数, 统计信息字典)
@@ -362,7 +421,7 @@ def fetch_comments_maximized(
         progress_callback(0, 0, "mode2")
     comments_mode2, total2 = fetch_comments(
         oid, comment_type=comment_type,
-        max_pages=max_pages_per_mode, sort_mode=2,
+        max_pages=max_pages_per_mode, sort_mode=2, limiter=limiter,
     )
     stats["mode2_count"] = len(comments_mode2)
     stats["mode2_exhausted"] = len(comments_mode2) < max_pages_per_mode * 20
@@ -372,7 +431,7 @@ def fetch_comments_maximized(
         progress_callback(0, 0, "mode3")
     comments_mode3, total3 = fetch_comments(
         oid, comment_type=comment_type,
-        max_pages=max_pages_per_mode, sort_mode=3,
+        max_pages=max_pages_per_mode, sort_mode=3, limiter=limiter,
     )
     stats["mode3_count"] = len(comments_mode3)
     stats["mode3_exhausted"] = len(comments_mode3) < max_pages_per_mode * 20

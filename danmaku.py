@@ -3,9 +3,13 @@ B站弹幕采集模块
 分段获取 + Protobuf 解码
 """
 import gzip
-import httpx
 import time
 from dataclasses import dataclass
+from datetime import datetime
+
+import httpx
+
+from bili_http import make_client
 
 
 @dataclass
@@ -21,6 +25,37 @@ class Danmaku:
     ctime: int          # 发送时间戳
     weight: int         # 权重
     pool: int           # 0=普通, 1=字幕, 2=特殊
+    action: str = ""    # 弹幕动作（高级弹幕）
+
+
+def danmaku_from_dict(d: dict) -> Danmaku:
+    """从 save_results 写出的 danmaku.json 条目还原 Danmaku
+
+    兼容保存格式：color 为 "#RRGGBB" 字符串（空串表示 0），ctime 为 ISO 时间字符串。
+    """
+    color = d.get("color", 0xFFFFFF)
+    if isinstance(color, str):
+        color = int(color.lstrip("#"), 16) if color else 0
+
+    ctime = d.get("ctime", 0)
+    if isinstance(ctime, str):
+        try:
+            ctime = int(datetime.fromisoformat(ctime).timestamp()) if ctime else 0
+        except ValueError:
+            ctime = 0
+
+    return Danmaku(
+        id=d.get("id", 0),
+        progress=d.get("progress", 0),
+        mode=d.get("mode", 0),
+        fontsize=d.get("fontsize", 25),
+        color=color,
+        mid_hash=d.get("mid_hash", ""),
+        content=d.get("content", ""),
+        ctime=ctime,
+        weight=d.get("weight", 0),
+        pool=d.get("pool", 0),
+    )
 
 
 class ProtobufReader:
@@ -141,26 +176,33 @@ class ProtobufReader:
         return d if has_content else None
 
 
-def fetch_danmaku_segment(oid: int, segment_index: int) -> bytes:
+def fetch_danmaku_segment(oid: int, segment_index: int,
+                          client: httpx.Client = None) -> bytes:
     """获取一个弹幕分段（6分钟一段，protobuf 格式）
-    不使用 WBI 签名，避免签名影响数据完整性"""
-    client = httpx.Client(
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com",
-        },
-        timeout=15, trust_env=False,
-    )
-    resp = client.get(
-        "https://api.bilibili.com/x/v2/dm/web/seg.so",
-        params={
-            "oid": oid,
-            "type": 1,
-            "segment_index": segment_index,
-        },
-    )
-    return resp.content if resp.status_code == 200 and len(resp.content) > 0 else b""
+    不使用 WBI 签名，避免签名影响数据完整性
+
+    Raises:
+        httpx.HTTPStatusError: 被限流等异常状态（404/304 视为空分段，不抛出）
+    """
+    own_client = client is None
+    if own_client:
+        client = make_client()
+    try:
+        resp = client.get(
+            "https://api.bilibili.com/x/v2/dm/web/seg.so",
+            params={
+                "oid": oid,
+                "type": 1,
+                "segment_index": segment_index,
+            },
+        )
+    finally:
+        if own_client:
+            client.close()
+    if resp.status_code in (304, 404):
+        return b""
+    resp.raise_for_status()
+    return resp.content
 
 
 def _decode_segment(raw: bytes) -> bytes | None:
@@ -187,45 +229,54 @@ def fetch_video_danmaku(
     duration_seconds: int,
     delay: float = 0.6,
     progress_callback=None,
+    limiter=None,
 ) -> list[Danmaku]:
     """采集视频的全部弹幕
 
     Args:
         oid: 视频 cid
         duration_seconds: 视频时长（秒）
-        delay: 段间延迟（秒，默认 0.6）
+        delay: 段间延迟（秒，默认 0.6；提供 limiter 时忽略）
         progress_callback: 进度回调 (current, total_segments)
+        limiter: 可选的 AdaptiveRateLimiter，控制段间延迟并记录成功/失败
+
+    Raises:
+        RuntimeError: 所有分段都获取失败（便于调用方加入重试队列）
     """
     # 每 6 分钟一个分段，segment_index 从 1 开始
     segment_count = max(1, (duration_seconds + 359) // 360)
 
     all_danmaku: list[Danmaku] = []
     errors = 0
+    last_error = None
 
-    for idx in range(1, segment_count + 1):  # 从 1 开始
-        try:
-            raw = fetch_danmaku_segment(oid, idx)
-        except Exception as e:
-            errors += 1
+    with make_client() as client:
+        for idx in range(1, segment_count + 1):
+            if idx > 1:
+                if limiter:
+                    limiter.wait()
+                else:
+                    time.sleep(delay)  # 频率控制
+
+            try:
+                raw = fetch_danmaku_segment(oid, idx, client=client)
+            except Exception as e:
+                errors += 1
+                last_error = e
+                if limiter:
+                    limiter.record_failure()
+            else:
+                if limiter:
+                    limiter.record_success()
+                decoded = _decode_segment(raw)
+                if decoded is not None:
+                    all_danmaku.extend(ProtobufReader(decoded).parse_danmaku_seg())
+
             if progress_callback:
                 progress_callback(idx, segment_count)
-            continue
 
-        decoded = _decode_segment(raw)
-        if decoded is None:
-            if progress_callback:
-                progress_callback(idx, segment_count)
-            continue
-
-        reader = ProtobufReader(decoded)
-        seg_dms = reader.parse_danmaku_seg()
-        all_danmaku.extend(seg_dms)
-
-        if progress_callback:
-            progress_callback(idx, segment_count)
-
-        time.sleep(delay)  # 频率控制
-
+    if errors == segment_count:
+        raise RuntimeError(f"全部 {segment_count} 个弹幕分段获取失败: {last_error}")
     if errors > 0:
         print(f"  ⚠ {errors}/{segment_count} 个弹幕分段获取失败")
 

@@ -5,8 +5,10 @@ B站 Wbi 签名模块
 import hashlib
 import time
 import urllib.parse
-from functools import lru_cache
+
 import httpx
+
+from bili_http import BASE_HEADERS, make_client
 
 # Wbi 签名用的固定盐值映射表
 MIXIN_KEY_ENC_TAB = [
@@ -26,16 +28,7 @@ class WbiSigner:
     """B站 Wbi 签名器，缓存 key 并自动刷新"""
 
     def __init__(self):
-        self._client = httpx.Client(
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://www.bilibili.com",
-                "Cookie": "buvid3=auto",
-            },
-            timeout=10,
-            trust_env=False,
-        )
+        self._client = make_client({**BASE_HEADERS, "Cookie": "buvid3=auto"}, timeout=10)
         self._mixin_key: str = ""
         self._last_refresh = 0.0
 
@@ -61,9 +54,22 @@ class WbiSigner:
             self._refresh_key()
         return self._mixin_key
 
+    def invalidate(self):
+        """丢弃缓存的 mixin_key，下次签名时强制重新获取"""
+        self._mixin_key = ""
+
     def sign(self, params: dict) -> dict:
-        """对请求参数进行 Wbi 签名，返回添加了 w_rid 和 wts 的新参数字典"""
+        """对请求参数进行 Wbi 签名，返回添加了 w_rid 和 wts 的新参数字典
+
+        不修改传入的 dict：重试时复用同一份参数，旧的 wts/w_rid 不会混进签名。
+        """
         mixin = self.mixin_key
+        # 去掉旧签名字段，并按规范过滤 value 中的 "!'()*" 字符
+        params = {
+            k: "".join(ch for ch in str(v) if ch not in "!'()*")
+            for k, v in (params or {}).items()
+            if k not in ("wts", "w_rid")
+        }
         # wts 需要略早于服务器时间，避免被当作未来时间戳拒绝
         params["wts"] = int(time.time()) - 5
         # 按 key 排序

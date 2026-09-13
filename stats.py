@@ -6,29 +6,22 @@ import json
 import os
 from collections import Counter
 from datetime import datetime
+from functools import lru_cache
 
 import jieba
 
-try:
-    from .comments import Comment
-    from .danmaku import Danmaku
-except ImportError:
-    from comments import Comment
-    from danmaku import Danmaku
+from comments import Comment
+from danmaku import Danmaku
 
 
-# 停用词列表
-STOP_WORDS = set(
-    "的一是了我人在有这他个为之么没到还然以们那也要就时但吧像很没呢得看会可好不"
-    "上中下大小多少来去前后左右里外说做干用能过和与或而从及并虽但若如果"
-    "因为所以虽然然而只是然后接着之后之前已经正在将要必须应该可能大概也许"
-    "啊哦哟啦唉嗯哈嘛耶哇呵嘿嗨咦咔"
-    "什么怎么怎么样为什么如果否则至于"
-    "这那其其哪哪里谁怎啥啥啥啥"
-    "对对对于根根据据除除了除按按照照比比方比如经过"
-    "的 是 了 在 有 个 和 也 就 都 要 会 可 能 对 没 人 得 说 不 这 那 很"
-    "为 之 么 与 而 且 但 或 如 若 因 所 以 从 由 被 把 将 及 跟"
-)
+# 停用词列表（segment_text 已过滤单字，这里只需要多字词）
+STOP_WORDS = {
+    "因为", "所以", "虽然", "然而", "只是", "然后", "接着", "之后", "之前",
+    "已经", "正在", "将要", "必须", "应该", "可能", "大概", "也许",
+    "什么", "怎么", "怎么样", "为什么", "如果", "否则", "至于",
+    "哪里", "对于", "根据", "除了", "按照", "比方", "比如", "经过",
+    "我们", "你们", "他们", "她们", "它们", "大家",
+}
 # 常见无意义词
 STOP_WORDS.update([
     "www", "com", "cn", "http", "https", "jpg", "png", "gif",
@@ -60,6 +53,7 @@ POSITIVE_WORDS = {
     "赞不绝口", "拍案叫绝", "叹为观止", "喜闻乐见", "大快人心",
     "正道的光", "国士无双", "天下第一", "一骑绝尘", "无人能及",
     "激动", "热血", "沸腾", "燃爆", "炸裂", "起飞",
+    "帅气", "好听", "好玩", "有趣", "有意思", "美丽", "感谢", "谢谢", "学到了",
 }
 NEGATIVE_WORDS = {
     # 基础差评
@@ -77,23 +71,123 @@ NEGATIVE_WORDS = {
     "不知所云", "莫名其妙", "牵强附会", "生搬硬套",
     "粗制滥造", "滥竽充数", "东施效颦", "狗尾续貂",
     "阴间", "阴乐", "配音像摔炮", "绷不住",
+    "难听", "没意思",
 }
+
+# 否定词：出现在情感词前面时翻转极性
+NEGATION_WORDS = {
+    "不", "没", "没有", "别", "不太", "不是", "并不", "毫不", "不够", "不怎么",
+    "没那么", "从不", "绝不", "并非", "不算", "一点也不", "一点都不",
+}
+# 回溯否定词时可以跳过的程度副词/虚词，如「不是很好」「没那么好看」
+_NEGATION_SKIP = {
+    "很", "太", "那么", "这么", "怎么", "特别", "非常", "真的", "真", "是",
+    "也", "都", "有点", "有些", "够", "算", "咋",
+}
+# 情感词前后常见的修饰，用于从「太好了」「真棒」「好烦啊」中取出核心词
+_DEGREE_PREFIXES = ("真的", "非常", "特别", "超级", "实在", "真", "太", "很", "超",
+                    "挺", "最", "好", "巨", "贼", "蛮")
+_TAIL_SUFFIXES = ("死了", "了", "啊", "呀", "吧", "哦", "的", "啦", "哇")
+# 三字及以上的情感短语，jieba 往往会拆开，先整体匹配
+_SENTIMENT_PHRASES = sorted(
+    [(w, 1) for w in POSITIVE_WORDS if len(w) >= 3] +
+    [(w, -1) for w in NEGATIVE_WORDS if len(w) >= 3],
+    key=lambda x: -len(x[0]),
+)
+
+
+@lru_cache(maxsize=200_000)
+def _cut(text: str) -> tuple[str, ...]:
+    """jieba 分词（带缓存：同一批弹幕会在词频、情感、主题差异中被反复分词，且重复文本很多）"""
+    return tuple(jieba.lcut(text))
 
 
 def segment_text(text: str) -> list[str]:
     """中文分词 + 去停用词"""
-    words = jieba.lcut(text)
-    return [w.strip() for w in words if len(w.strip()) >= 2 and w.strip() not in STOP_WORDS]
+    words = (w.strip() for w in _cut(text))
+    return [w for w in words if len(w) >= 2 and w not in STOP_WORDS]
 
 
+def _word_polarity(word: str) -> int:
+    """单个词的情感极性：1 正面 / -1 负面 / 0 无"""
+    if word in POSITIVE_WORDS:
+        return 1
+    if word in NEGATIVE_WORDS:
+        return -1
+    return 0
+
+
+def _token_polarity(token: str) -> tuple[int, bool]:
+    """分词结果的情感极性，返回 (极性, 词内是否自带否定)
+
+    依次尝试：原词 → 去掉语气尾缀 → 去掉程度前缀 → 两者都去掉，
+    再处理「不喜欢」这类否定词与情感词粘在一起的情况。
+    """
+    candidates = [token]
+    for suf in _TAIL_SUFFIXES:
+        if len(token) > len(suf) and token.endswith(suf):
+            candidates.append(token[:-len(suf)])
+            break
+    for base in list(candidates):
+        for pre in _DEGREE_PREFIXES:
+            if len(base) > len(pre) and base.startswith(pre):
+                candidates.append(base[len(pre):])
+                break
+    for c in candidates:
+        polarity = _word_polarity(c)
+        if polarity:
+            return polarity, False
+    for neg in ("不", "没"):
+        if len(token) > 1 and token.startswith(neg):
+            polarity = _word_polarity(token[1:])
+            if polarity:
+                return polarity, True
+    return 0, False
+
+
+@lru_cache(maxsize=200_000)
 def analyze_sentiment(text: str) -> str:
-    """简易情感分析，返回 'positive', 'negative', 'neutral'"""
-    words = segment_text(text)
-    pos = sum(1 for w in words if w in POSITIVE_WORDS)
-    neg = sum(1 for w in words if w in NEGATIVE_WORDS)
-    if pos > neg:
+    """词典法情感分析，返回 'positive', 'negative', 'neutral'
+
+    - 三字以上短语整体匹配（如「永远的神」「粗制滥造」）
+    - 其余按 jieba 分词匹配，保留单字情感词（好/棒/烂/坑…）
+    - 情感词前 3 个词内出现否定词（可跳过程度副词）时翻转极性，如「不好看」「不是很喜欢」
+    """
+    score_pos = score_neg = 0
+
+    for phrase, polarity in _SENTIMENT_PHRASES:
+        if phrase in text:
+            hits = text.count(phrase)
+            if polarity > 0:
+                score_pos += hits
+            else:
+                score_neg += hits
+            text = text.replace(phrase, "，")
+
+    tokens = [t.strip() for t in _cut(text)]
+    for i, tok in enumerate(tokens):
+        if not tok:
+            continue
+        polarity, negated = _token_polarity(tok)
+        if not polarity:
+            continue
+        if not negated:
+            for prev in reversed(tokens[max(0, i - 3):i]):
+                if prev in NEGATION_WORDS:
+                    negated = True
+                    break
+                if prev not in _NEGATION_SKIP:
+                    break
+        if negated:
+            polarity = -polarity
+        if polarity > 0:
+            score_pos += 1
+        else:
+            score_neg += 1
+
+    if score_pos > score_neg:
         return "positive"
-    elif neg > pos:
+    elif score_neg > score_pos:
         return "negative"
     return "neutral"
 
@@ -341,6 +435,8 @@ def build_statistics(comments: list[Comment], danmaku: list[Danmaku],
                      video_specs: dict = None, owner_mid: int = 0) -> dict:
     """构建完整的统计数据"""
     stats = {}
+    if owner_mid:
+        stats["owner_mid"] = owner_mid  # 保存下来，重算统计（--comments-only）时需要
 
     # === 视频硬参数 ===
     if video_specs:
@@ -351,9 +447,11 @@ def build_statistics(comments: list[Comment], danmaku: list[Danmaku],
         total_comments = len(comments)
         total_replies = sum(len(c.replies) for c in comments)
         avg_likes = sum(c.like for c in comments) / total_comments if total_comments else 0
+        # 优先使用接口的 up_action.reply；预览回复（每条最多约3条）里出现 UP 主也算
         up_reply_count = sum(
             1 for c in comments
-            if c.replies and owner_mid > 0 and any(r.mid == owner_mid for r in c.replies)
+            if getattr(c, "up_replied", False)
+            or (owner_mid > 0 and any(r.mid == owner_mid for r in c.replies))
         )
 
         # 情感分布
@@ -431,8 +529,9 @@ def build_statistics(comments: list[Comment], danmaku: list[Danmaku],
             },
             "top_colors": color_counts.most_common(10),
             "top_words": dm_word_freq[:30],
-            "time_heatmap": {f"{k * 10 // 60}:{(k * 10) % 60:02d}": v
-                             for k, v in sorted(time_buckets.items())[:120]},
+            # 覆盖完整时长（空桶补 0，保证曲线横轴是均匀时间）；上限 10000 桶≈28 小时
+            "time_heatmap": {f"{k * 10 // 60}:{(k * 10) % 60:02d}": time_buckets.get(k, 0)
+                             for k in range(min(max(time_buckets) + 1, 10000))},
         }
 
     # === 弹幕高潮检测 ===
@@ -440,9 +539,8 @@ def build_statistics(comments: list[Comment], danmaku: list[Danmaku],
         peaks = detect_danmaku_peaks(danmaku)
         stats["danmaku_peaks"] = peaks[:5]  # Top 5 高潮时刻
 
-        # 情感曲线
-        curve = build_sentiment_curve(danmaku)
-        stats["sentiment_curve"] = curve[::2]  # 每隔一个窗口输出，控制大小
+        # 情感曲线（60 秒一个窗口：控制数据量，同时不丢弃任何弹幕）
+        stats["sentiment_curve"] = build_sentiment_curve(danmaku, window_sec=60)
 
     # === 评论弹幕主题差异 ===
     if comments and danmaku:
@@ -536,14 +634,19 @@ def save_results(
         with open(os.path.join(output_dir, "comments.json"), "w", encoding="utf-8") as f:
             json.dump([{
                 "rpid": c.rpid,
+                "mid": c.mid,
                 "member_name": c.member_name,
                 "content": c.content,
                 "ctime": datetime.fromtimestamp(c.ctime).isoformat() if c.ctime else "",
                 "like": c.like,
                 "rcount": c.rcount,
+                "up_replied": getattr(c, "up_replied", False),
                 "replies": [{
+                    "rpid": r.rpid,
+                    "mid": r.mid,
                     "member_name": r.member_name,
                     "content": r.content,
+                    "ctime": datetime.fromtimestamp(r.ctime).isoformat() if r.ctime else "",
                     "like": r.like,
                 } for r in c.replies],
             } for c in comments], f, ensure_ascii=False, indent=2)
@@ -556,9 +659,12 @@ def save_results(
                 "progress": d.progress,
                 "time": f"{d.progress // 60000}:{(d.progress % 60000) // 1000:02d}",
                 "mode": d.mode,
+                "fontsize": d.fontsize,
                 "color": f"#{d.color:06X}" if d.color else "",
+                "mid_hash": d.mid_hash,
                 "content": d.content,
                 "ctime": datetime.fromtimestamp(d.ctime).isoformat() if d.ctime else "",
+                "weight": d.weight,
                 "pool": d.pool,
             } for d in danmaku], f, ensure_ascii=False, indent=2)
 

@@ -1,10 +1,12 @@
 """
 B站周热榜评论 & 弹幕统计分析 - 主入口
 """
+import argparse
 import os
 import sys
 import json
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 # 确保 Windows GBK 终端能输出 emoji
@@ -16,217 +18,405 @@ if sys.stderr.encoding != "utf-8":
 # 确保能找到模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ranking import fetch_weekly_videos, fetch_weekly_series, get_series_info
-from comments import fetch_comments, fetch_comments_maximized
-from danmaku import fetch_video_danmaku
-from stats import build_statistics, print_report, save_results, build_cross_video_comparison
+from ranking import VideoInfo, fetch_weekly_videos, fetch_weekly_series, get_series_info
+from comments import fetch_comments, fetch_comments_maximized, check_login
+from danmaku import fetch_video_danmaku, danmaku_from_dict
+from stats import build_statistics, print_report, save_results
 from content_analyzer import (
     fetch_hardware_params, download_cover, capture_frames, build_content_prompts,
     generate_mcp_task_list,
 )
-from report_writer import generate_video_report, generate_summary_report
+from report_writer import generate_video_report, write_summary
+from rebuild import PRESERVED_KEYS, rebuild_all
 from checkpoint_manager import CheckpointManager
 from adaptive_retry import (
     AdaptiveRateLimiter, RetryQueue,
     create_comment_limiter, create_danmaku_limiter, create_inter_video_limiter,
 )
 
+# 评论每种排序默认最多采集的页数（每页 20 条）
+DEFAULT_COMMENT_PAGES = 100
 
-def process_video(video, output_base: str, no_content: bool = False,
-                  no_frames: bool = False, checkpoint: CheckpointManager = None,
-                  comment_limiter: AdaptiveRateLimiter = None,
-                  danmaku_limiter: AdaptiveRateLimiter = None,
-                  retry_queue: RetryQueue = None,
-                  maximize_comments: bool = True):
-    """处理单个视频：采集评论 + 弹幕 + 统计 + 内容分析"""
-    aid = video.aid if hasattr(video, "aid") else video["aid"]
-    cid = video.cid if hasattr(video, "cid") else video.get("cid", 0)
-    bvid = video.bvid if hasattr(video, "bvid") else video.get("bvid", "")
-    title = video.title if hasattr(video, "title") else video["title"]
-    duration = video.duration if hasattr(video, "duration") else video.get("duration", 0)
-    pic_url = video.pic if hasattr(video, "pic") else video.get("pic", "")
 
-    # 清理文件名
-    safe_title = "".join(c for c in title if c.isalnum() or c in " _-（）()【】")[:40]
-    output_dir = os.path.join(output_base, f"{aid}_{safe_title}")
+@dataclass
+class VideoJob:
+    """单个视频的采集上下文
 
-    print(f"\n{'─' * 50}")
-    print(f"🎬 {title}")
-    print(f"   aid={aid}, cid={cid}, 时长={duration // 60}分{duration % 60}秒")
-    print(f"{'─' * 50}")
+    保存采集到的原始数据和失败项，失败重试时只补采失败的部分，
+    再用完整数据重新统计、保存和生成报告。
+    """
+    video: VideoInfo
+    output_dir: str
+    dir_name: str
+    no_content: bool = False
+    no_frames: bool = False
+    maximize_comments: bool = True
+    comment_max_pages: int = DEFAULT_COMMENT_PAGES
+    bvid: str = ""
+    owner_mid: int = 0
+    video_specs: dict = field(default_factory=dict)
+    cover_path: str | None = None
+    comments: list = field(default_factory=list)
+    comment_stats_info: dict | None = None
+    danmaku: list = field(default_factory=list)
+    failures: dict = field(default_factory=dict)  # {"comments" | "danmaku": 错误信息}
+    stats: dict = field(default_factory=dict)
+    content_prompts: dict = field(default_factory=dict)
+    report_path: str | None = None
 
-    # ── 内容分析：硬参数采集 ──
-    video_specs = {}
-    if not no_content:
-        print("  采集硬参数...", end=" ")
-        try:
-            video_specs = fetch_hardware_params(aid)
-            print(f"✓ {video_specs.get('width', '?')}x{video_specs.get('height', '?')} "
-                  f"{video_specs.get('duration_seconds', '?')}s")
-            # 从硬参数补充缺失字段
-            if not bvid and video_specs.get("bvid"):
-                bvid = video_specs["bvid"]
-            if not pic_url and video_specs.get("pic_url"):
-                pic_url = video_specs["pic_url"]
-        except Exception as e:
-            print(f"✗ {e}")
 
-    # ── 内容分析：封面下载 ──
-    cover_path = None
-    if not no_content and pic_url:
-        print("  下载封面...", end=" ")
-        cover_path = download_cover(pic_url, os.path.join(output_dir, "cover.jpg"))
-        if cover_path:
-            print("✓")
-        else:
-            print("✗ 下载失败")
+def _warn_if_not_logged_in():
+    """登录凭证缺失或失效时提示：未登录会话每种排序只能拿到约 3 条评论"""
+    status = check_login()
+    if status is True:
+        return
+    if status is False:
+        print("⚠️ 登录凭证 SESSDATA 已失效（当前为未登录状态）")
+    else:
+        print("⚠️ 未配置登录凭证 SESSDATA（或登录状态检查失败）")
+    print("   未登录时每个视频每种排序只能采到约 3 条评论，评论数据会严重不全。")
+    print("   请更新环境变量 BILI_SESSDATA 或项目根目录 .sessdata，"
+          "可运行 python bili_auth.py 自检\n")
 
-    # 采集评论
-    comment_stats_info = None
-    if maximize_comments:
+
+def _collect_comments(job: VideoJob, limiter: AdaptiveRateLimiter = None):
+    """采集评论写入 job，失败时抛出异常"""
+    aid = job.video.aid
+    if job.maximize_comments:
         print("  采集评论(双模式最大化)...", end=" ")
-        try:
-            comments, comment_total, comment_stats_info = fetch_comments_maximized(aid)
-            print(f"✓ {len(comments)} 条主评论 (去重后) / {comment_total} 总计")
-            if comment_stats_info:
-                print(f"    mode2={comment_stats_info['mode2_count']} "
-                      f"mode3={comment_stats_info['mode3_count']} "
-                      f"重叠{comment_stats_info['overlap_count']}条 "
-                      f"新增{comment_stats_info['mode3_count'] - comment_stats_info['overlap_count']}条")
-        except Exception as e:
-            print(f"✗ {e}")
-            if retry_queue:
-                retry_queue.add(aid, title, "comments", str(e),
-                                {"maximize": True})
-            comments = []
+        comments, comment_total, info = fetch_comments_maximized(
+            aid, max_pages_per_mode=job.comment_max_pages, limiter=limiter,
+        )
+        print(f"✓ {len(comments)} 条主评论 (去重后) / {comment_total} 总计")
+        if info:
+            print(f"    mode2={info['mode2_count']} "
+                  f"mode3={info['mode3_count']} "
+                  f"重叠{info['overlap_count']}条 "
+                  f"新增{info['mode3_count'] - info['overlap_count']}条")
     else:
         print("  采集评论...", end=" ")
-        try:
-            comments, comment_total = fetch_comments(aid)
-            print(f"✓ {len(comments)} 条主评论 / {comment_total} 总计")
-        except Exception as e:
-            print(f"✗ {e}")
-            if retry_queue:
-                retry_queue.add(aid, title, "comments", str(e))
-            comments = []
+        comments, comment_total = fetch_comments(
+            aid, max_pages=job.comment_max_pages, limiter=limiter,
+        )
+        info = None
+        print(f"✓ {len(comments)} 条主评论 / {comment_total} 总计")
+    job.comments = comments
+    job.comment_stats_info = info
 
-    # 采集弹幕
-    if cid and duration > 0:
-        print("  采集弹幕...", end=" ")
-        try:
-            delay = danmaku_limiter.current_delay if danmaku_limiter else 0.6
-            danmaku = fetch_video_danmaku(cid, duration, delay=delay)
-            print(f"✓ {len(danmaku)} 条弹幕")
-        except Exception as e:
-            print(f"✗ {e}")
-            if retry_queue:
-                retry_queue.add(aid, title, "danmaku", str(e),
-                                {"cid": cid, "duration": duration})
-            danmaku = []
-    else:
-        print("  跳过弹幕 (无 cid 或时长为0)")
-        danmaku = []
 
-    if not comments and not danmaku and not video_specs:
-        print("  ⚠️ 无数据，跳过")
-        if checkpoint:
-            checkpoint.mark_video_failed(aid, "无数据：评论、弹幕、视频规格均为空", title)
-        return None
+def _danmaku_pages(job: VideoJob) -> list[tuple[int, int, int]]:
+    """需要采集弹幕的分P [(cid, 时长秒, 在整体时间轴上的起点毫秒)]
 
-    # 统计分析
-    owner_mid = video.owner_mid if hasattr(video, "owner_mid") else video.get("owner_mid", 0)
-    stats = build_statistics(comments, danmaku, video_specs=video_specs, owner_mid=owner_mid)
+    多P视频（有硬参数时）逐P采集，并按顺序拼接成一条时间轴；否则只采主 cid。
+    """
+    pages = job.video_specs.get("pages") or []
+    if len(pages) > 1 and all(p.get("cid") and p.get("duration") for p in pages):
+        result, offset_ms = [], 0
+        for p in pages:
+            result.append((p["cid"], p["duration"], offset_ms))
+            offset_ms += p["duration"] * 1000
+        return result
+    if job.video.cid and job.video.duration > 0:
+        return [(job.video.cid, job.video.duration, 0)]
+    return []
+
+
+def _collect_danmaku(job: VideoJob, limiter: AdaptiveRateLimiter = None):
+    """采集弹幕写入 job，失败时抛出异常"""
+    pages = _danmaku_pages(job)
+    print(f"  采集弹幕{f'({len(pages)}P)' if len(pages) > 1 else ''}...", end=" ")
+    danmaku = []
+    for cid, duration, offset_ms in pages:
+        page_danmaku = fetch_video_danmaku(cid, duration, limiter=limiter)
+        for d in page_danmaku:
+            d.progress += offset_ms
+        danmaku.extend(page_danmaku)
+    job.danmaku = danmaku
+    print(f"✓ {len(job.danmaku)} 条弹幕")
+
+
+def _capture_peak_frames(job: VideoJob, peaks: list[dict]) -> list[dict]:
+    """按高潮时间所在的分P截取缩略图，结果保持 peaks 的顺序"""
+    frames_dir = os.path.join(job.output_dir, "frames")
+    pages = _danmaku_pages(job) or [(job.video.cid, job.video.duration, 0)]
+    by_page: dict[int, list[dict]] = {}
+    for peak in peaks:
+        minutes, seconds = peak["time"].split(":")
+        peak_ms = (int(minutes) * 60 + int(seconds)) * 1000
+        index = 0
+        for i, (_, _, offset_ms) in enumerate(pages):
+            if peak_ms >= offset_ms:
+                index = i
+        by_page.setdefault(index, []).append(peak)
+
+    results = []
+    for index, page_peaks in by_page.items():
+        cid, duration, offset_ms = pages[index]
+        results.extend(capture_frames(
+            job.bvid, page_peaks, frames_dir, cid=cid, aid=job.video.aid,
+            duration_seconds=duration, time_offset_ms=offset_ms,
+        ))
+    order = {id(p): i for i, p in enumerate(peaks)}
+    return sorted(results, key=lambda r: order.get(id(r["timestamp_info"]), 0))
+
+
+def _analyze_and_save(job: VideoJob, checkpoint: CheckpointManager = None):
+    """统计分析 + 高潮帧 + 保存结果 + 生成报告，并按是否有失败项更新断点状态"""
+    video = job.video
+    stats = build_statistics(job.comments, job.danmaku,
+                             video_specs=job.video_specs, owner_mid=job.owner_mid)
+    stats["video_info"] = {
+        "title": video.title, "bvid": job.bvid, "owner_name": video.owner_name,
+        "view": video.view, "like": video.like, "coin": video.coin,
+        "favorite": video.favorite, "pubdate": video.pubdate,
+    }
     # 附加评论采集统计
-    if comment_stats_info:
-        stats["comment_collection"] = comment_stats_info
+    if job.comment_stats_info:
+        stats["comment_collection"] = job.comment_stats_info
 
     # ── 内容分析：弹幕高潮帧截取 ──
     frame_results = []
-    if not no_content and not no_frames and bvid and danmaku:
+    if not job.no_content and not job.no_frames and job.bvid and job.danmaku:
         peaks = stats.get("danmaku_peaks", [])
         if peaks:
             top_peaks = peaks[:3]  # Top 3 高潮时刻
             print(f"  截取 {len(top_peaks)} 个高潮帧...", end=" ")
             try:
-                frame_dir = os.path.join(output_dir, "frames")
-                frame_results = capture_frames(
-                    bvid, top_peaks, frame_dir, cid=cid, aid=aid,
-                    duration_seconds=duration,
-                )
+                frame_results = _capture_peak_frames(job, top_peaks)
                 print(f"✓ 成功 {len(frame_results)}/{len(top_peaks)}")
             except Exception as e:
                 print(f"✗ {e}")
 
     # ── 内容分析：生成 MCP 分析提示词 ──
-    content_prompts = {}
-    if not no_content:
-        content_prompts = build_content_prompts(cover_path, frame_results, title)
+    job.content_prompts = {}
+    if not job.no_content:
+        job.content_prompts = build_content_prompts(job.cover_path, frame_results, video.title)
         # 保存提示词供后续 MCP 分析
-        if content_prompts:
-            import json
-            with open(os.path.join(output_dir, "content_prompts.json"), "w", encoding="utf-8") as f:
-                json.dump(content_prompts, f, ensure_ascii=False, indent=2)
-        stats["video_specs"] = video_specs
-        stats["cover_path"] = cover_path
+        if job.content_prompts:
+            os.makedirs(job.output_dir, exist_ok=True)
+            with open(os.path.join(job.output_dir, "content_prompts.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(job.content_prompts, f, ensure_ascii=False, indent=2)
+        stats["video_specs"] = job.video_specs
+        stats["cover_path"] = job.cover_path
         stats["frame_results"] = frame_results
 
-    print_report(stats, title)
-    save_results(comments, danmaku, stats, output_dir, title)
+    print_report(stats, video.title)
+    save_results(job.comments, job.danmaku, stats, job.output_dir, video.title)
+    job.stats = stats
 
     # ── 生成 Markdown 报告 ──
-    report_path = None
+    job.report_path = None
     try:
-        report_path = generate_video_report(stats, output_dir, title, content_prompts)
-        if report_path:
-            print(f"  📄 报告: {report_path}")
+        job.report_path = generate_video_report(stats, job.output_dir, video.title,
+                                                job.content_prompts)
+        if job.report_path:
+            print(f"  📄 报告: {job.report_path}")
     except Exception as e:
         print(f"  ⚠️ 报告生成失败: {e}")
 
-    # 标记完成
+    # 有采集失败项时记为 failed：下次运行（断点续传）会重新采集，而不是永久跳过
     if checkpoint:
-        stats_summary = {
-            "comments": stats.get("comments", {}).get("total", 0),
-            "danmaku": stats.get("danmaku", {}).get("total", 0),
-        }
-        checkpoint.mark_video_complete(aid, f"{aid}_{safe_title}",
-                                       stats_summary, title)
+        if job.failures:
+            detail = "; ".join(f"{op}: {err}" for op, err in job.failures.items())
+            checkpoint.mark_video_failed(video.aid, f"部分采集失败 - {detail}", video.title)
+        else:
+            stats_summary = {
+                "comments": stats.get("comments", {}).get("total", 0),
+                "danmaku": stats.get("danmaku", {}).get("total", 0),
+            }
+            checkpoint.mark_video_complete(video.aid, job.dir_name, stats_summary, video.title)
 
+
+def process_video(video: VideoInfo, output_base: str, no_content: bool = False,
+                  no_frames: bool = False, checkpoint: CheckpointManager = None,
+                  comment_limiter: AdaptiveRateLimiter = None,
+                  danmaku_limiter: AdaptiveRateLimiter = None,
+                  retry_queue: RetryQueue = None,
+                  maximize_comments: bool = True,
+                  comment_max_pages: int = DEFAULT_COMMENT_PAGES) -> VideoJob | None:
+    """处理单个视频：采集评论 + 弹幕 + 统计 + 内容分析
+
+    Returns:
+        VideoJob（可能带有 failures，失败项已加入 retry_queue）；完全无数据时返回 None
+    """
+    # 清理文件名
+    safe_title = "".join(c for c in video.title if c.isalnum() or c in " _-（）()【】")[:40]
+    dir_name = f"{video.aid}_{safe_title}"
+    job = VideoJob(
+        video=video, output_dir=os.path.join(output_base, dir_name), dir_name=dir_name,
+        no_content=no_content, no_frames=no_frames,
+        maximize_comments=maximize_comments, comment_max_pages=comment_max_pages,
+        bvid=video.bvid, owner_mid=video.owner_mid,
+    )
+
+    print(f"\n{'─' * 50}")
+    print(f"🎬 {video.title}")
+    print(f"   aid={video.aid}, cid={video.cid}, "
+          f"时长={video.duration // 60}分{video.duration % 60}秒")
+    print(f"{'─' * 50}")
+
+    # ── 内容分析：硬参数采集 ──
+    # --no-content 时通常跳过；但 --aid 模式缺 cid/时长时仍需要它来补全，否则采不到弹幕
+    pic_url = video.pic
+    if not no_content or not video.cid or not video.duration:
+        print("  采集硬参数...", end=" ")
+        try:
+            specs = fetch_hardware_params(video.aid)
+            if not no_content:
+                job.video_specs = specs
+            print(f"✓ {specs.get('width', '?')}x{specs.get('height', '?')} "
+                  f"{specs.get('duration_seconds', '?')}s")
+            # 从硬参数补充缺失字段
+            job.bvid = job.bvid or specs.get("bvid", "")
+            job.owner_mid = job.owner_mid or specs.get("owner_mid", 0)
+            pic_url = pic_url or specs.get("pic_url", "")
+            # --aid 模式未提供 cid/时长时，用第一个分P补全，弹幕才能采集
+            pages = specs.get("pages") or []
+            if not video.cid and pages:
+                video.cid = pages[0]["cid"]
+                video.duration = video.duration or pages[0].get("duration", 0)
+            video.duration = video.duration or specs.get("duration_seconds", 0)
+        except Exception as e:
+            print(f"✗ {e}")
+
+    # ── 内容分析：封面下载 ──
+    if not no_content and pic_url:
+        print("  下载封面...", end=" ")
+        job.cover_path = download_cover(pic_url, os.path.join(job.output_dir, "cover.jpg"))
+        print("✓" if job.cover_path else "✗ 下载失败")
+
+    # 采集评论
+    try:
+        _collect_comments(job, comment_limiter)
+    except Exception as e:
+        print(f"✗ {e}")
+        job.failures["comments"] = str(e)
+
+    # 采集弹幕
+    if _danmaku_pages(job):
+        try:
+            _collect_danmaku(job, danmaku_limiter)
+        except Exception as e:
+            print(f"✗ {e}")
+            job.failures["danmaku"] = str(e)
+    else:
+        print("  跳过弹幕 (无 cid 或时长为0)")
+
+    if retry_queue:
+        for op, err in job.failures.items():
+            retry_queue.add(video.aid, video.title, op, err, {"job": job})
+
+    if not job.comments and not job.danmaku and not job.video_specs:
+        print("  ⚠️ 无数据，跳过")
+        if checkpoint:
+            reason = "; ".join(job.failures.values()) or "评论、弹幕、视频规格均为空"
+            checkpoint.mark_video_failed(video.aid, f"无数据：{reason}", video.title)
+        return None
+
+    _analyze_and_save(job, checkpoint)
+    return job
+
+
+def _summary_entry(job: VideoJob) -> dict:
+    """跨视频对比 / 汇总报告使用的条目"""
     return {
-        "comments": comments, "danmaku": danmaku, "stats": stats,
-        "content_prompts": content_prompts, "report_path": report_path,
+        "aid": job.video.aid,
+        "title": job.video.title,
+        "views": job.video.view,
+        "likes": job.video.like,
+        "stats": job.stats,
     }
 
 
-def _find_resumable_dir(output_root: str, series_number: int) -> str | None:
-    """查找可复用的断点续传目录
+def _retry_failed(retry_queue: RetryQueue, all_stats: list[dict],
+                  checkpoint: CheckpointManager = None,
+                  comment_limiter: AdaptiveRateLimiter = None,
+                  danmaku_limiter: AdaptiveRateLimiter = None,
+                  inter_video_limiter: AdaptiveRateLimiter = None):
+    """补采失败项，把补到的数据写回对应视频的结果、报告和汇总列表"""
+    if not retry_queue.has_pending():
+        return
 
-    优先匹配相同系列号且已完成最多的目录。
+    print(f"\n{'─' * 50}")
+    print(f"🔄 重试失败项 ({retry_queue.get_pending_count()} 项)")
+    print(f"{'─' * 50}")
+
+    updated_jobs: dict[int, VideoJob] = {}
+    for item in retry_queue.get_pending():
+        job = item.context.get("job")
+        if job is None or item.operation not in ("comments", "danmaku"):
+            retry_queue.mark_retried(item, False, "不支持的重试操作")
+            continue
+
+        # 失败多半是限流导致的，重试前先冷却
+        if inter_video_limiter:
+            print(f"  ⏱ 冷却 {inter_video_limiter.current_delay:.1f}s...")
+            inter_video_limiter.wait()
+        else:
+            time.sleep(60)
+
+        print(f"  重试 [{item.operation}] {item.title[:30]} (aid={item.aid})")
+        try:
+            if item.operation == "comments":
+                _collect_comments(job, comment_limiter)
+            else:
+                _collect_danmaku(job, danmaku_limiter)
+        except Exception as e:
+            print(f"✗ {e}")
+            job.failures[item.operation] = str(e)
+            retry_queue.mark_retried(item, False, str(e))
+            continue
+
+        job.failures.pop(item.operation, None)
+        retry_queue.mark_retried(item, True)
+        updated_jobs[job.video.aid] = job
+
+    for aid, job in updated_jobs.items():
+        print(f"\n  ♻️ 用补采数据重新生成: {job.video.title[:40]}")
+        _analyze_and_save(job, checkpoint)
+        entry = _summary_entry(job)
+        for idx, existing in enumerate(all_stats):
+            if existing["aid"] == aid:
+                all_stats[idx] = entry
+                break
+        else:
+            all_stats.append(entry)
+
+
+def _load_resume_state(run_dir: str) -> dict | None:
+    """读取运行目录下的断点续传清单，不存在或损坏时返回 None"""
+    manifest_path = os.path.join(run_dir, CheckpointManager.MANIFEST_FILE)
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _find_resumable_dir(output_root: str, series_number: int) -> str | None:
+    """查找同一期、尚未完成的运行目录，优先已完成最多的
+
+    只复用期号一致的目录：期号未知或不一致时新建目录，避免不同期的数据混在一起。
     """
-    if not os.path.isdir(output_root):
+    if not series_number or not os.path.isdir(output_root):
         return None
 
     best_match = None
     best_completed = -1
-    fallback = None
-    fallback_completed = -1
 
     for entry in sorted(os.listdir(output_root), reverse=True):
         entry_path = os.path.join(output_root, entry)
         if not os.path.isdir(entry_path):
             continue
-
-        manifest_path = os.path.join(entry_path, "resume_state.json")
-        if not os.path.isfile(manifest_path):
-            continue
-
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        state = _load_resume_state(entry_path)
+        if not state or state.get("series_number") != series_number:
             continue
 
         videos = state.get("videos", {})
-        completed = sum(1 for v in videos.values() if v["state"] == "completed")
+        completed = sum(1 for v in videos.values() if v.get("state") == "completed")
         total = state.get("total_videos", 0)
 
         # 所有视频都已处理完成 → 跳过
@@ -235,147 +425,112 @@ def _find_resumable_dir(output_root: str, series_number: int) -> str | None:
         if completed > 0 and total == 0:
             continue
 
-        same_series = series_number and state.get("series_number") == series_number
-
-        if same_series and completed > best_completed:
+        if completed > best_completed:
             best_completed = completed
             best_match = entry_path
-        elif not same_series and completed > fallback_completed:
-            fallback_completed = completed
-            fallback = entry_path
 
-    # 优先返回同系列号目录，否则返回最新不完整目录
-    return best_match or fallback
+    return best_match
 
 
-def _recollect_comments_only(output_root: str, maximize: bool = True):
-    """仅重新采集已完成视频的评论，更新 stats 和报告"""
-    from comments import fetch_comments_maximized, fetch_comments
-    from stats import build_statistics, print_report, save_results
-    from report_writer import generate_video_report
+def _latest_run_dir(output_root: str) -> str | None:
+    """最新的、带断点续传清单的运行目录"""
+    if not os.path.isdir(output_root):
+        return None
+    for entry in sorted(os.listdir(output_root), reverse=True):
+        entry_path = os.path.join(output_root, entry)
+        if os.path.isdir(entry_path) and _load_resume_state(entry_path) is not None:
+            return entry_path
+    return None
 
-    # 找到最新的运行目录
-    run_dir = _find_resumable_dir(output_root, None)
+
+def _find_video_dir(run_dir: str, aid: int, dir_name: str = "") -> str | None:
+    """定位视频输出目录：优先用清单记录的目录名，否则按 aid 前缀查找"""
+    if dir_name and os.path.isdir(os.path.join(run_dir, dir_name)):
+        return os.path.join(run_dir, dir_name)
+    for entry in os.listdir(run_dir):
+        if entry.startswith(f"{aid}_") and os.path.isdir(os.path.join(run_dir, entry)):
+            return os.path.join(run_dir, entry)
+    return None
+
+
+def _recollect_comments_only(output_root: str, maximize: bool = True,
+                             comment_max_pages: int = DEFAULT_COMMENT_PAGES):
+    """仅重新采集最新一次运行中已完成视频的评论，更新 stats 和报告"""
+    run_dir = _latest_run_dir(output_root)
     if not run_dir:
-        # 回退：找最新的有子目录的
-        if os.path.isdir(output_root):
-            dirs = sorted(
-                [d for d in os.listdir(output_root)
-                 if os.path.isdir(os.path.join(output_root, d))],
-                reverse=True,
-            )
-            for d in dirs:
-                candidate = os.path.join(output_root, d)
-                if os.path.isfile(os.path.join(candidate, "resume_state.json")):
-                    run_dir = candidate
-                    break
-            if not run_dir:
-                print("错误: 找不到可用的运行目录")
-                return
-        else:
-            print("错误: 找不到可用的运行目录")
-            return
-
-    print(f"📋 评论重采模式: {os.path.basename(run_dir)}")
-
-    # 读取 manifest 获取已完成视频
-    manifest_path = os.path.join(run_dir, "resume_state.json")
-    if not os.path.isfile(manifest_path):
-        print("错误: 无断点续传清单")
+        print("错误: 找不到可用的运行目录（需包含 resume_state.json）")
         return
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        state = json.load(f)
-
-    videos = state.get("videos", {})
+    print(f"📋 评论重采模式: {os.path.basename(run_dir)}")
+    state = _load_resume_state(run_dir) or {}
     completed = [
-        (int(aid), entry["title"])
-        for aid, entry in videos.items()
-        if entry["state"] == "completed"
+        (int(aid), entry.get("title", ""), entry.get("output_dir", ""))
+        for aid, entry in state.get("videos", {}).items()
+        if entry.get("state") == "completed"
     ]
-
     if not completed:
         print("无已完成视频可重新采集")
         return
 
     print(f"  共 {len(completed)} 个视频需要重新采集评论\n")
 
-    for i, (aid, title) in enumerate(completed, 1):
-        # 找到对应的输出目录
-        video_dir = None
-        for entry in os.listdir(run_dir):
-            if entry.startswith(f"{aid}_"):
-                video_dir = os.path.join(run_dir, entry)
-                break
+    for i, (aid, title, dir_name) in enumerate(completed, 1):
+        video_dir = _find_video_dir(run_dir, aid, dir_name)
         if not video_dir:
             print(f"[{i}/{len(completed)}] {title[:30]} - ⚠️ 目录不存在，跳过")
             continue
 
         print(f"[{i}/{len(completed)}] {title[:40]}")
 
-        # 重新采集评论
-        if maximize:
-            print("  采集评论(双模式)...", end=" ")
-            try:
-                comments, _, _ = fetch_comments_maximized(aid)
-            except Exception as e:
-                print(f"✗ {e}")
-                comments = []
-        else:
-            try:
-                comments, _ = fetch_comments(aid)
-            except Exception as e:
-                print(f"✗ {e}")
-                comments = []
-        print(f"✓ {len(comments)} 条")
-
         # 读取现有 stats
         stats_path = os.path.join(video_dir, "stats.json")
+        stats = {}
         if os.path.isfile(stats_path):
             with open(stats_path, "r", encoding="utf-8") as f:
                 stats = json.load(f)
-        else:
-            stats = {}
+        old_comment_total = stats.get("comments", {}).get("total", 0)
 
-        # 读取现有 danmaku（JSON → Dataclass 对象）
+        # 重新采集评论；失败或一条没拿到时保留原数据，避免覆盖成空
+        comment_stats_info = None
+        try:
+            if maximize:
+                print("  采集评论(双模式)...", end=" ")
+                comments, _, comment_stats_info = fetch_comments_maximized(
+                    aid, max_pages_per_mode=comment_max_pages)
+            else:
+                print("  采集评论...", end=" ")
+                comments, _ = fetch_comments(aid, max_pages=comment_max_pages)
+        except Exception as e:
+            print(f"✗ {e}，保留原有数据")
+            continue
+        if not comments and old_comment_total > 0:
+            print(f"✗ 未采集到评论（原有 {old_comment_total} 条），保留原有数据")
+            continue
+        print(f"✓ {len(comments)} 条")
+
+        # 读取现有弹幕
         danmaku_path = os.path.join(video_dir, "danmaku.json")
         danmaku = []
         if os.path.isfile(danmaku_path):
             with open(danmaku_path, "r", encoding="utf-8") as f:
-                raw_danmaku = json.load(f)
-            from danmaku import Danmaku
-            danmaku = [
-                Danmaku(
-                    id=d.get("id", 0),
-                    progress=d.get("progress", 0),
-                    mode=d.get("mode", 0),
-                    fontsize=d.get("fontsize", 25),
-                    color=d.get("color", 0xFFFFFF),
-                    mid_hash=d.get("mid_hash", ""),
-                    content=d.get("content", ""),
-                    ctime=d.get("ctime", 0),
-                    weight=d.get("weight", 0),
-                    pool=d.get("pool", 0),
-                )
-                for d in raw_danmaku
-                if isinstance(d, dict)
-            ]
+                danmaku = [danmaku_from_dict(d) for d in json.load(f) if isinstance(d, dict)]
 
-        # 重新统计分析
+        # 重新统计分析（旧数据没有保存 owner_mid 时从视频信息补取）
         video_specs = stats.get("video_specs", {})
-        owner_mid = stats.get("owner_mid", 0)
+        owner_mid = stats.get("owner_mid") or video_specs.get("owner_mid", 0)
+        if not owner_mid:
+            try:
+                owner_mid = fetch_hardware_params(aid).get("owner_mid", 0)
+            except Exception:
+                pass
         new_stats = build_statistics(comments, danmaku,
-                                     video_specs=video_specs,
-                                     owner_mid=owner_mid)
-        # 保留 MCP 分析结果
-        if "mcp_analysis" in stats:
-            new_stats["mcp_analysis"] = stats["mcp_analysis"]
-        if "video_specs" in stats:
-            new_stats["video_specs"] = stats["video_specs"]
-        if "cover_path" in stats:
-            new_stats["cover_path"] = stats["cover_path"]
-        if "frame_results" in stats:
-            new_stats["frame_results"] = stats["frame_results"]
+                                     video_specs=video_specs, owner_mid=owner_mid)
+        if comment_stats_info:
+            new_stats["comment_collection"] = comment_stats_info
+        # 保留内容分析 / MCP 分析结果等无法从评论弹幕重算的字段
+        for key in PRESERVED_KEYS:
+            if key in stats and not (key == "comment_collection" and comment_stats_info):
+                new_stats[key] = stats[key]
 
         print_report(new_stats, title)
         save_results(comments, danmaku, new_stats, video_dir, title)
@@ -388,8 +543,7 @@ def _recollect_comments_only(output_root: str, maximize: bool = True):
                 content_prompts = json.load(f)
 
         try:
-            report_path = generate_video_report(new_stats, video_dir, title,
-                                                content_prompts)
+            report_path = generate_video_report(new_stats, video_dir, title, content_prompts)
             if report_path:
                 print(f"  📄 报告已更新: {report_path}")
         except Exception as e:
@@ -402,48 +556,65 @@ def _recollect_comments_only(output_root: str, maximize: bool = True):
     # 重新生成汇总
     print("\n重新生成汇总报告...")
     all_stats_objs = []
-    for aid, title in completed:
-        for entry in os.listdir(run_dir):
-            if entry.startswith(f"{aid}_"):
-                d = os.path.join(run_dir, entry)
-                sp = os.path.join(d, "stats.json")
-                if os.path.isfile(sp):
-                    with open(sp, "r", encoding="utf-8") as f:
-                        s = json.load(f)
-                    all_stats_objs.append({
-                        "aid": aid, "title": title,
-                        "views": 0, "likes": 0, "stats": s,
-                    })
-                break
+    for aid, title, dir_name in completed:
+        video_dir = _find_video_dir(run_dir, aid, dir_name)
+        stats_path = os.path.join(video_dir, "stats.json") if video_dir else ""
+        if stats_path and os.path.isfile(stats_path):
+            with open(stats_path, "r", encoding="utf-8") as f:
+                video_stats = json.load(f)
+            info = video_stats.get("video_info", {})
+            all_stats_objs.append({
+                "aid": aid, "title": title,
+                "views": info.get("view", 0), "likes": info.get("like", 0),
+                "stats": video_stats,
+            })
 
     if len(all_stats_objs) >= 2:
         series_num = state.get("series_number")
-        series_nm = state.get("series_name", "")
-        si = {"number": series_num, "name": series_nm} if series_num else None
-        from report_writer import generate_summary_report
-        from stats import build_cross_video_comparison
-        comparison = build_cross_video_comparison(all_stats_objs)
-        with open(os.path.join(run_dir, "summary.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump(comparison, f, ensure_ascii=False, indent=2)
+        si = {"number": series_num, "name": state.get("series_name", "")} if series_num else None
         try:
-            spath = generate_summary_report(all_stats_objs, run_dir, si)
-            if spath:
-                print(f"  📄 汇总报告已更新: {spath}")
+            _, spath = write_summary(all_stats_objs, run_dir, si)
+            print(f"  📄 汇总报告已更新: {spath}")
         except Exception as e:
             print(f"  ⚠️ 汇总报告失败: {e}")
 
     print("\n✅ 评论重采完成!")
 
 
+def _print_rankings(comparison: dict):
+    """终端打印跨视频对比排行"""
+    print("\n" + "=" * 60)
+    print("🏆 跨视频横向对比")
+    print("=" * 60)
+
+    rankings = comparison.get("rankings", {})
+    ranking_sections = [
+        ("danmaku_density", "📊 弹幕密度排行 TOP 5:"),
+        ("up_interaction", "💬 UP主互动率排行 TOP 5:"),
+        ("positive_sentiment", "😊 正面评论率排行 TOP 5:"),
+    ]
+    for key, heading in ranking_sections:
+        if key in rankings:
+            print(f"\n{heading}")
+            for item in rankings[key][:5]:
+                print(f"  #{item['rank']} {item['title'][:35]} - {item['value']}{item['unit']}")
+
+    overall = comparison.get("overall_scores", [])
+    if overall:
+        print("\n🌟 综合评分 TOP 10:")
+        for item in overall[:10]:
+            print(f"  #{item['rank']} {item['title'][:35]} - {item['overall_score']}/100")
+
+
 def main():
-    import argparse
-    import json
     parser = argparse.ArgumentParser(description="B站周热榜评论弹幕统计分析")
-    parser.add_argument("-n", "--number", type=int, default=None,
-                        help="指定周热榜期号，不指定则获取最新一期")
+    parser.add_argument("-s", "--series", type=int, default=None,
+                        help="指定每周必看期号，不指定则获取最新一期")
+    parser.add_argument("-n", "--number", type=int, default=0,
+                        help="最多处理的视频数量 (默认0=全部)")
     parser.add_argument("-l", "--limit", type=int, default=0,
-                        help="采集视频数量上限 (默认0=全部)")
+                        help=f"评论每种排序最多采集的页数，每页20条 "
+                             f"(默认0={DEFAULT_COMMENT_PAGES}页)")
     parser.add_argument("-o", "--output", type=str, default="./bilibili_output",
                         help="输出目录 (默认 ./bilibili_output)")
     parser.add_argument("--list", action="store_true",
@@ -451,9 +622,9 @@ def main():
     parser.add_argument("--aid", type=int, default=None,
                         help="直接指定视频 aid（跳过周热榜）")
     parser.add_argument("--cid", type=int, default=None,
-                        help="直接指定视频 cid（配合 --aid 使用）")
+                        help="直接指定视频 cid（配合 --aid 使用，不填则自动获取第一个分P）")
     parser.add_argument("--duration", type=int, default=0,
-                        help="视频时长（秒，配合 --aid 使用）")
+                        help="视频时长（秒，配合 --aid 使用，不填则自动获取）")
     parser.add_argument("--title", type=str, default="",
                         help="视频标题（配合 --aid 使用）")
     parser.add_argument("--no-content", action="store_true",
@@ -468,7 +639,13 @@ def main():
                         help="禁用双模式评论采集（仅用 mode=2）")
     parser.add_argument("--comments-only", action="store_true",
                         help="仅重新采集已处理视频的评论（跳过弹幕/内容分析）")
+    parser.add_argument("--rebuild", nargs="?", const="", default=None, metavar="RUN_DIR",
+                        help="离线重建：用已保存的评论/弹幕重新统计并生成报告，不联网。"
+                             "指定运行目录则只重建该目录，否则重建 -o 下全部")
     args = parser.parse_args()
+
+    comment_max_pages = args.limit if args.limit > 0 else DEFAULT_COMMENT_PAGES
+    maximize_comments = not args.no_maximize_comments
 
     # 列出期号
     if args.list:
@@ -478,23 +655,32 @@ def main():
             print(f"  第 {s['number']} 期: {s['name']} ({s.get('subject', '')})")
         return
 
-    output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    # 离线重建（不联网，放在登录检查之前）
+    if args.rebuild is not None:
+        target = args.rebuild or args.output
+        count = rebuild_all(target)
+        print(f"\n✅ 离线重建完成：共 {count} 个视频")
+        return
+
+    _warn_if_not_logged_in()
 
     # 直接采集模式
     if args.aid:
-        from ranking import VideoInfo
         video = VideoInfo(
             aid=args.aid, cid=args.cid or 0, bvid="", title=args.title or "手动指定",
             owner_name="", owner_mid=0, view=0, danmaku=0, reply=0,
             favorite=0, coin=0, share=0, like=0,
             duration=args.duration, width=0, height=0, pic="", pubdate=0,
         )
-        process_video(video, output_base, args.no_content, args.no_frames)
+        output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
+        process_video(video, output_base, args.no_content, args.no_frames,
+                      maximize_comments=maximize_comments,
+                      comment_max_pages=comment_max_pages)
         return
 
     # ── 仅重新采集评论模式 ──
     if args.comments_only:
-        _recollect_comments_only(args.output, not args.no_maximize_comments)
+        _recollect_comments_only(args.output, maximize_comments, comment_max_pages)
         return
 
     # 周热榜模式
@@ -505,10 +691,9 @@ def main():
 
     use_checkpoint = not args.no_checkpoint
     use_adaptive = not args.no_adaptive
-    maximize_comments = not args.no_maximize_comments
 
     # 获取榜单元信息
-    series_number = args.number
+    series_number = args.series
     info = None
     series_name = ""
     if series_number:
@@ -523,48 +708,37 @@ def main():
 
     videos = fetch_weekly_videos(series_number)
 
-    # 获取最新一期的期号
-    if info is None and not series_number:
-        # 从视频列表反推期号：尝试获取最新期信息
+    # 未指定期号时，从期号列表取最新一期的期号（断点续传按期号匹配目录）
+    if not series_number:
         try:
-            # 获取期号列表，最新的是第一个
             series_list = fetch_weekly_series()
             if series_list:
-                latest = sorted(series_list, key=lambda x: x["number"], reverse=True)[0]
+                latest = max(series_list, key=lambda x: x["number"])
                 series_number = latest["number"]
                 series_name = latest.get("name", "")
                 info = {"number": series_number, "name": series_name,
                         "video_count": len(videos)}
                 print(f"  第 {series_number} 期: {series_name} ({len(videos)} 个视频)")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  ⚠️ 获取最新期号失败（本次不做断点续传匹配）: {e}")
 
     print(f"  获取到 {len(videos)} 个视频\n")
 
-    # ── 智能输出目录：断点续传时复用已有目录 ──
-    if use_checkpoint:
-        # 查找是否有可复用的运行目录
-        output_base = _find_resumable_dir(args.output, series_number)
-        if output_base:
-            print(f"📋 断点续传模式：复用目录 {os.path.basename(output_base)}")
-        else:
-            output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    # 限制处理的视频数量
+    if args.number > 0:
+        videos = videos[:args.number]
+
+    # ── 智能输出目录：断点续传时复用同一期未完成的目录 ──
+    output_base = _find_resumable_dir(args.output, series_number) if use_checkpoint else None
+    if output_base:
+        print(f"📋 断点续传模式：复用目录 {os.path.basename(output_base)}")
     else:
         output_base = os.path.join(args.output, datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(output_base, exist_ok=True)
 
-    # 限制数量（0 表示不限制）
-    if args.limit > 0:
-        videos = videos[:args.limit]
-
-    # 获取系列信息用于 checkpoint
-    if info is None and series_number:
-        info = get_series_info(series_number)
-
     # ── 初始化断点续传 ──
     checkpoint = None
     if use_checkpoint:
-        series_name = info["name"] if info else ""
         checkpoint = CheckpointManager(
             output_base, series_number=series_number,
             series_name=series_name, total_videos=len(videos),
@@ -579,8 +753,6 @@ def main():
 
     if not videos:
         print("✅ 所有视频已处理完成！")
-        if checkpoint:
-            checkpoint.print_progress()
         return
 
     # ── 初始化自适应速率限制 ──
@@ -602,33 +774,28 @@ def main():
     # ── 逐个处理 ──
     all_stats = []
     for i, v in enumerate(videos, 1):
-        total = len(videos)
+        progress = ""
         if checkpoint:
             p = checkpoint.get_progress()
-            total = p["total"]
-        print(f"[{i}/{total}]", end="")
-        result = process_video(
+            progress = f" (总进度 {p['completed']}/{p['total']})"
+        print(f"[{i}/{len(videos)}]{progress}", end="")
+        job = process_video(
             v, output_base, args.no_content, args.no_frames,
             checkpoint=checkpoint,
             comment_limiter=comment_limiter,
             danmaku_limiter=danmaku_limiter,
             retry_queue=retry_queue,
             maximize_comments=maximize_comments,
+            comment_max_pages=comment_max_pages,
         )
-        if result:
-            all_stats.append({
-                "aid": v.aid,
-                "title": v.title,
-                "views": v.view,
-                "likes": v.like,
-                "stats": result["stats"],
-            })
-            # 成功时通知限流器
-            if inter_video_limiter:
+        if job:
+            all_stats.append(_summary_entry(job))
+
+        # 通知限流器：有采集失败项同样视为失败，拉长后续冷却
+        if inter_video_limiter:
+            if job and not job.failures:
                 inter_video_limiter.record_success()
-        else:
-            # 失败时通知限流器
-            if inter_video_limiter:
+            else:
                 inter_video_limiter.record_failure()
 
         # 自适应视频间冷却
@@ -641,35 +808,10 @@ def main():
                 time.sleep(60)
 
     # ── 重试失败项 ──
-    if retry_queue.has_pending():
-        print(f"\n{'─' * 50}")
-        print(f"🔄 重试失败项 ({retry_queue.get_pending_count()} 项)")
-        print(f"{'─' * 50}")
-        for item in retry_queue.get_pending():
-            print(f"  重试 [{item.operation}] {item.title[:30]} (aid={item.aid})...")
-            try:
-                if item.operation == "comments":
-                    if item.context.get("maximize"):
-                        comments, _, _ = fetch_comments_maximized(item.aid)
-                    else:
-                        comments, _ = fetch_comments(item.aid)
-                    retry_queue.mark_retried(item, True)
-                    print(f"    ✓ 采集到 {len(comments)} 条评论")
-                elif item.operation == "danmaku":
-                    danmaku = fetch_video_danmaku(
-                        item.context.get("cid", 0),
-                        item.context.get("duration", 0),
-                    )
-                    retry_queue.mark_retried(item, True)
-                    print(f"    ✓ 采集到 {len(danmaku)} 条弹幕")
-                else:
-                    retry_queue.mark_retried(item, False, "不支持的重试操作")
-            except Exception as e:
-                retry_queue.mark_retried(item, False, str(e))
-                print(f"    ✗ {e}")
+    _retry_failed(retry_queue, all_stats, checkpoint,
+                  comment_limiter, danmaku_limiter, inter_video_limiter)
 
     # ── MCP 清单生成 ──
-    mcp_manifest_path = None
     if not args.no_content and all_stats:
         try:
             mcp_manifest_path = generate_mcp_task_list(output_base)
@@ -679,61 +821,22 @@ def main():
         except Exception as e:
             print(f"\n⚠️ MCP 清单生成失败: {e}")
 
-    # ── 跨视频横向对比 ──
-    if len(all_stats) >= 3:
-        print("\n" + "=" * 60)
-        print("🏆 跨视频横向对比")
-        print("=" * 60)
-        comparison = build_cross_video_comparison(all_stats)
-
-        # 弹幕密度 TOP 5
-        rankings = comparison.get("rankings", {})
-        if "danmaku_density" in rankings:
-            print("\n📊 弹幕密度排行 TOP 5:")
-            for item in rankings["danmaku_density"][:5]:
-                print(f"  #{item['rank']} {item['title'][:35]} - {item['value']}{item['unit']}")
-
-        # UP主互动率 TOP 5
-        if "up_interaction" in rankings:
-            print("\n💬 UP主互动率排行 TOP 5:")
-            for item in rankings["up_interaction"][:5]:
-                print(f"  #{item['rank']} {item['title'][:35]} - {item['value']}{item['unit']}")
-
-        # 正面评论率 TOP 5
-        if "positive_sentiment" in rankings:
-            print("\n😊 正面评论率排行 TOP 5:")
-            for item in rankings["positive_sentiment"][:5]:
-                print(f"  #{item['rank']} {item['title'][:35]} - {item['value']}{item['unit']}")
-
-        # 综合评分
-        overall = comparison.get("overall_scores", [])
-        if overall:
-            print("\n🌟 综合评分 TOP 10:")
-            for item in overall[:10]:
-                print(f"  #{item['rank']} {item['title'][:35]} - {item['overall_score']}/100")
-
-        # 保存汇总
-        import json
-        with open(os.path.join(output_base, "summary.json"), "w", encoding="utf-8") as f:
-            json.dump(comparison, f, ensure_ascii=False, indent=2)
-
-    # ── 汇总报告 ──
+    # ── 跨视频对比 + 汇总报告 ──
     if len(all_stats) >= 2:
-        series_info = None
-        if args.number or series_number:
-            series_info = {
-                "number": args.number or series_number,
-                "name": info.get("name", "") if info else "",
-            }
+        series_info = {"number": series_number, "name": series_name} if series_number else None
         try:
-            summary_path = generate_summary_report(all_stats, output_base, series_info)
-            if summary_path:
-                print(f"\n📄 汇总报告: {summary_path}")
+            comparison, summary_path = write_summary(all_stats, output_base, series_info)
         except Exception as e:
             print(f"\n⚠️ 汇总报告生成失败: {e}")
+        else:
+            if len(all_stats) >= 3:
+                _print_rankings(comparison)
+            print(f"\n📄 汇总报告: {summary_path}")
 
     # ── 错误汇总 ──
     retry_queue.print_summary()
+    if retry_queue.has_pending() and checkpoint:
+        print("  未成功的视频已标记为失败，下次运行会自动重新采集")
 
     # ── 进度汇总 ──
     if checkpoint:
@@ -749,7 +852,7 @@ def main():
         cc = item["stats"].get("comment_collection", {})
         extra = ""
         if cc:
-            extra = f" | 评论采集: mode2={cc.get('mode2_count',0)} + mode3={cc.get('mode3_count',0)}"
+            extra = f" | 评论采集: mode2={cc.get('mode2_count', 0)} + mode3={cc.get('mode3_count', 0)}"
         print(f"\n📺 {item['title'][:40]}")
         print(f"   评论: {c.get('total', 0)} | 弹幕: {d.get('total', 0)} | "
               f"弹幕密度: {d.get('density_per_minute', 0)}/分钟{extra}")

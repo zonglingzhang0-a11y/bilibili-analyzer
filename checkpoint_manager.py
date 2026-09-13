@@ -30,7 +30,7 @@ class CheckpointManager:
                 self._state["series_number"] = series_number
             if series_name and not self._state.get("series_name"):
                 self._state["series_name"] = series_name
-            if total_videos and not self._state.get("total_videos"):
+            if total_videos > (self._state.get("total_videos") or 0):
                 self._state["total_videos"] = total_videos
         else:
             self._state = {
@@ -112,7 +112,8 @@ class CheckpointManager:
 
                 entry_key = str(aid)
                 existing = self._state["videos"].get(entry_key, {})
-                if existing.get("state") != "completed":
+                # 标记为 failed 的视频虽然可能写出了部分 stats.json，但需要重新采集
+                if existing.get("state") not in ("completed", "failed"):
                     title = parts[1] if len(parts) > 1 else ""
                     self._state["videos"][entry_key] = {
                         "aid": aid,
@@ -136,6 +137,8 @@ class CheckpointManager:
         entry = self._state["videos"].get(str(aid), {})
         if entry.get("state") == "completed":
             return True
+        if entry.get("state") == "failed":
+            return False  # 部分数据采集失败，即使磁盘上有 stats.json 也要重跑
 
         # 再查磁盘（处理清单丢失的情况）
         if not os.path.isdir(self.output_base):
@@ -200,7 +203,7 @@ class CheckpointManager:
     def get_progress(self) -> dict:
         """获取进度概览"""
         videos = self._state.get("videos", {})
-        total = len(videos) or self._state.get("total_videos", 0)
+        total = max(len(videos), self._state.get("total_videos") or 0)
         completed = sum(1 for v in videos.values() if v["state"] == "completed")
         failed = sum(1 for v in videos.values() if v["state"] == "failed")
         pending = max(0, total - completed - failed)

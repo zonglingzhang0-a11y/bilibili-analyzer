@@ -213,6 +213,7 @@ class RetryQueue:
                     "operation": item.operation,
                     "error": item.error,
                     "retried": item.retry_count,
+                    "max_retries": item.max_retries,
                 }
                 for item in all_failures
             ],
@@ -230,7 +231,7 @@ class RetryQueue:
               f"(可重试{summary['retryable']} / 已放弃{summary['permanent']})")
         print(f"{'─' * 50}")
         for item in summary["details"]:
-            status = "🔄 可重试" if item["retried"] < 3 else "❌ 已放弃"
+            status = "🔄 可重试" if item["retried"] < item["max_retries"] else "❌ 已放弃"
             print(f"  {status} [{item['operation']}] "
                   f"{item['title'][:30]} (aid={item['aid']})")
             print(f"         错误: {item['error'][:80]}")

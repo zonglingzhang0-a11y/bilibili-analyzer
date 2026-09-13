@@ -267,20 +267,47 @@ def _md_section(title: str, level: int = 2) -> str:
     return f"\n{'#' * level} {title}\n"
 
 
+def _md_cell(value) -> str:
+    """表格单元格：转义竖线、去掉换行"""
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
     """Markdown 表格"""
     lines = ["| " + " | ".join(headers) + " |",
              "| " + " | ".join("---" for _ in headers) + " |"]
     for row in rows:
-        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+        lines.append("| " + " | ".join(_md_cell(c) for c in row) + " |")
     return "\n".join(lines) + "\n"
 
 
 def _md_img(src: str, alt: str = "", relative_to: str = None) -> str:
-    """Markdown 图片引用"""
+    """Markdown 图片引用
+
+    relative_to: 报告所在目录。图片路径会转换为相对该目录的路径，
+    统一用正斜杠，并转义空格和括号，保证各类 Markdown 阅读器都能显示。
+    """
     if relative_to:
-        src = os.path.relpath(src, relative_to) if os.path.isabs(src) else src
+        try:
+            src = os.path.relpath(os.path.abspath(src), os.path.abspath(relative_to))
+        except ValueError:  # Windows 下跨盘符无法计算相对路径
+            src = os.path.abspath(src)
+    src = src.replace("\\", "/").replace(" ", "%20").replace("(", "%28").replace(")", "%29")
     return f"![{alt}]({src})\n"
+
+
+def _resolve_asset(path: str, output_dir: str, subdir: str = "") -> str | None:
+    """定位封面/高潮帧图片
+
+    stats.json 里记录的是采集时相对工作目录的路径，换了工作目录或复制、移动过输出目录后
+    可能失效或指向别处。优先使用报告目录（或其子目录）下的同名文件，其次才用原路径。
+    """
+    if not path:
+        return None
+    candidate = os.path.join(output_dir, subdir, os.path.basename(path.replace("\\", "/")))
+    if os.path.exists(candidate):
+        return candidate
+    return path if os.path.exists(path) else None
 
 
 def _md_collapse(summary: str, content: str) -> str:
@@ -331,9 +358,9 @@ def generate_video_report(
         ))
 
     # 封面
-    cover_path = stats.get("cover_path", "")
-    if cover_path and os.path.exists(cover_path):
-        lines.append(_md_img(cover_path, "视频封面"))
+    cover_path = _resolve_asset(stats.get("cover_path"), output_dir)
+    if cover_path:
+        lines.append(_md_img(cover_path, "视频封面", output_dir))
         # MCP 封面分析结果（优先从 stats 中读取 mcp_analysis，回退到独立文件）
         cover_analysis_text = None
         mcp_cover = stats.get("mcp_analysis", {}).get("cover", "")
@@ -364,7 +391,7 @@ def generate_video_report(
             chart_path = os.path.join(charts_dir, "danmaku_modes.png")
             chart_danmaku_modes(modes, chart_path)
             if os.path.exists(chart_path):
-                lines.append(_md_img(chart_path, "弹幕类型分布"))
+                lines.append(_md_img(chart_path, "弹幕类型分布", output_dir))
 
         # 弹幕密度曲线
         heatmap = dm.get("time_heatmap", {})
@@ -372,7 +399,7 @@ def generate_video_report(
             chart_path = os.path.join(charts_dir, "danmaku_density.png")
             chart_danmaku_density(heatmap, chart_path, f"《{video_title}》弹幕密度曲线")
             if os.path.exists(chart_path):
-                lines.append(_md_img(chart_path, "弹幕密度曲线"))
+                lines.append(_md_img(chart_path, "弹幕密度曲线", output_dir))
 
         # 热门颜色
         top_colors = dm.get("top_colors", [])[:5]
@@ -388,7 +415,7 @@ def generate_video_report(
         chart_path = os.path.join(charts_dir, "sentiment_curve.png")
         chart_sentiment_curve(curve, chart_path, f"《{video_title}》弹幕情感时间曲线")
         if os.path.exists(chart_path):
-            lines.append(_md_img(chart_path, "弹幕情感曲线"))
+            lines.append(_md_img(chart_path, "弹幕情感曲线", output_dir))
 
     # 弹幕高潮时刻
     peaks = stats.get("danmaku_peaks", [])
@@ -411,14 +438,14 @@ def generate_video_report(
             chart_path = os.path.join(charts_dir, "sentiment_pie.png")
             chart_sentiment_pie(sentiment, chart_path)
             if os.path.exists(chart_path):
-                lines.append(_md_img(chart_path, "评论情感分布"))
+                lines.append(_md_img(chart_path, "评论情感分布", output_dir))
 
         top_words = c.get("top_words", [])
         if top_words:
             chart_path = os.path.join(charts_dir, "top_words_comments.png")
             chart_top_words(top_words, chart_path, f"《{video_title}》评论高频词")
             if os.path.exists(chart_path):
-                lines.append(_md_img(chart_path, "评论高频词"))
+                lines.append(_md_img(chart_path, "评论高频词", output_dir))
 
         # 最长评论
         longest = c.get("longest_comment")
@@ -461,9 +488,9 @@ def generate_video_report(
             time_str = ti.get("time", "?")
             density = ti.get("density", 0)
             lines.append(f"### 高潮 #{i} — {time_str}（{density}条/6秒）\n")
-            frame_path = fr.get("frame_path", "")
-            if frame_path and os.path.exists(frame_path):
-                lines.append(_md_img(frame_path, f"高潮帧 {time_str}"))
+            frame_path = _resolve_asset(fr.get("frame_path"), output_dir, "frames")
+            if frame_path:
+                lines.append(_md_img(frame_path, f"高潮帧 {time_str}", output_dir))
 
             # MCP 分析结果：优先从 stats.mcp_analysis.frames 读取（新格式）
             fa_data = None
@@ -503,11 +530,7 @@ def generate_video_report(
 
     # ── 附录：原始数据 ──
     lines.append(_md_section("附录：原始数据"))
-    lines.append(f"完整原始数据请查看附件：`stats.json`\n")
-    # 同时保存一份独立 stats.json（供查阅和程序读取）
-    stats_file = os.path.join(output_dir, "stats.json")
-    with open(stats_file, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    lines.append("完整原始数据请查看附件：`stats.json`、`comments.json`、`danmaku.json`\n")
 
     # 写出报告
     report = "\n".join(lines)
@@ -522,6 +545,7 @@ def generate_summary_report(
     all_stats: list[dict],
     output_dir: str,
     series_info: dict = None,
+    comparison: dict = None,
 ) -> str:
     """生成多视频汇总 Markdown 报告
 
@@ -529,6 +553,7 @@ def generate_summary_report(
         all_stats: [{"aid", "title", "views", "likes", "stats"}, ...]
         output_dir: 输出目录
         series_info: 周热榜期号信息 {"number": 377, "name": "..."}
+        comparison: 已计算好的 build_cross_video_comparison 结果（不传则现算）
 
     Returns:
         report.md 文件路径
@@ -545,8 +570,9 @@ def generate_summary_report(
     lines.append(f"共分析 **{len(all_stats)}** 个视频\n")
 
     # 构建跨视频对比
-    from stats import build_cross_video_comparison
-    comparison = build_cross_video_comparison(all_stats)
+    if comparison is None:
+        from stats import build_cross_video_comparison
+        comparison = build_cross_video_comparison(all_stats)
 
     # 综合评分图
     overall = comparison.get("overall_scores", [])
@@ -555,7 +581,7 @@ def generate_summary_report(
         chart_path = os.path.join(charts_dir, "cross_video_score.png")
         chart_cross_video_comparison(overall, comparison.get("rankings", {}), chart_path)
         if os.path.exists(chart_path):
-            lines.append(_md_img(chart_path, "综合评分排行"))
+            lines.append(_md_img(chart_path, "综合评分排行", output_dir))
         lines.append("")
 
     # 各维度排行表格
@@ -604,3 +630,18 @@ def generate_summary_report(
         f.write(report)
 
     return report_path
+
+
+def write_summary(all_stats: list[dict], output_dir: str,
+                  series_info: dict = None) -> tuple[dict, str]:
+    """计算跨视频对比，写出 summary.json 和汇总报告 report.md
+
+    Returns:
+        (对比结果, 汇总报告路径)
+    """
+    from stats import build_cross_video_comparison
+    comparison = build_cross_video_comparison(all_stats)
+    with open(os.path.join(output_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(comparison, f, ensure_ascii=False, indent=2)
+    report_path = generate_summary_report(all_stats, output_dir, series_info, comparison)
+    return comparison, report_path
