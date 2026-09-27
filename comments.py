@@ -42,6 +42,9 @@ class Comment:
 
 # 全量采集时的翻页上限（每页 20 条，足够覆盖任何视频），只作为防止死循环的保护
 FULL_MAX_PAGES = 100_000
+# 全量采集的完整性校验：接口总数不少于该值时，要求 一级评论 + 楼中楼 至少覆盖总数的这个比例
+FULL_CHECK_MIN_TOTAL = 100
+FULL_MIN_COVERAGE = 0.5
 # 表示视频本身没有可采评论的接口返回码：采到 0 条是正常结果，不算失败
 # 12002=评论区已关闭，12061=UP主已关闭评论区，-404=无此资源
 COMMENTS_UNAVAILABLE_CODES = (12002, 12061, -404)
@@ -385,6 +388,13 @@ def fetch_comments_full(
         "reported_total": total,
         "sub_replies": sum(c.rcount for c in comments),
     }
+    # 未登录时接口第一页就标记"到底"，只给约 3 条，会被当成正常结束。
+    # 正常全量采集时 一级评论 + 楼中楼 约占接口总数的 87%～100%，远低于此说明没有采全
+    covered = info["collected"] + info["sub_replies"]
+    if total >= FULL_CHECK_MIN_TOTAL and covered < FULL_MIN_COVERAGE * total:
+        raise CommentsIncomplete(
+            f"采到的评论（含楼中楼）只有 {covered} 条，占接口总数 {total} 的 {covered / total:.0%}，"
+            "可能是登录已失效或被限制", len(comments))
     return comments, total, info
 
 

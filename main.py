@@ -76,18 +76,30 @@ class VideoJob:
     report_path: str | None = None
 
 
-def _warn_if_not_logged_in():
-    """登录凭证缺失或失效时提示：未登录会话每种排序只能拿到约 3 条评论"""
+def _check_login(required: bool) -> bool:
+    """检查登录状态。未登录时每个视频每种排序只能拿到约 3 条评论
+
+    Args:
+        required: 为 True 时（全量采集、评论重采）未登录即拒绝运行，避免产生残缺数据
+
+    Returns:
+        是否可以继续运行
+    """
     status = check_login()
     if status is True:
-        return
+        return True
     if status is False:
         print("⚠️ 登录凭证 SESSDATA 已失效（当前为未登录状态）")
     else:
         print("⚠️ 未配置登录凭证 SESSDATA（或登录状态检查失败）")
     print("   未登录时每个视频每种排序只能采到约 3 条评论，评论数据会严重不全。")
     print("   请更新环境变量 BILI_SESSDATA 或项目根目录 .sessdata，"
-          "可运行 python bili_auth.py 自检\n")
+          "可运行 python bili_auth.py 自检")
+    if required:
+        print("✗ 全量采集 / 评论重采需要有效的登录状态，已停止运行\n")
+        return False
+    print()
+    return True
 
 
 def _comment_strategy(full: bool, maximize: bool, max_pages: int) -> str:
@@ -835,7 +847,8 @@ def main():
         print(f"\n✅ 离线重建完成：共 {count} 个视频")
         return
 
-    _warn_if_not_logged_in()
+    if not _check_login(required=args.full_comments or args.comments_only):
+        return
 
     # 直接采集模式
     if args.aid:

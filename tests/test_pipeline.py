@@ -321,3 +321,38 @@ def test_unexpected_error_code_is_incomplete(monkeypatch):
 
     with pytest.raises(comments.CommentsIncomplete):
         comments.fetch_comments_full(1)
+
+
+class _GuestPageClient:
+    """模拟未登录：第一页只给 3 条评论并标记到底，接口总数却有 2000"""
+
+    def get(self, url, params=None):
+        replies = [{"rpid": i, "oid": 1, "mid": i, "member": {"uname": "u"},
+                    "content": {"message": "好"}, "ctime": 0, "like": 0, "rcount": 5}
+                   for i in range(3)]
+        return _FakeResponse({"code": 0, "data": {
+            "replies": replies,
+            "cursor": {"next": 0, "is_end": True, "is_begin": True, "all_count": 2000},
+        }})
+
+    def close(self):
+        pass
+
+
+def test_full_collection_rejects_guest_sized_result(monkeypatch):
+    _patch_comment_session(monkeypatch, _GuestPageClient())
+
+    with pytest.raises(comments.CommentsIncomplete, match="登录已失效"):
+        comments.fetch_comments_full(1)
+
+
+def test_full_collection_refuses_to_start_without_login(monkeypatch):
+    import sys
+    started = []
+    monkeypatch.setattr(main, "check_login", lambda: False)
+    monkeypatch.setattr(main, "_recollect_comments_only", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(sys, "argv", ["main.py", "--comments-only", "--full-comments"])
+
+    main.main()
+
+    assert started == []
