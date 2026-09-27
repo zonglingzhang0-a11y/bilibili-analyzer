@@ -93,8 +93,8 @@ def _check_login(required: bool) -> bool:
     else:
         print("⚠️ 未配置登录凭证 SESSDATA（或登录状态检查失败）")
     print("   未登录时每个视频每种排序只能采到约 3 条评论，评论数据会严重不全。")
-    print("   请更新环境变量 BILI_SESSDATA 或项目根目录 .sessdata，"
-          "可运行 python bili_auth.py 自检")
+    print("   可运行 python bili_auth.py --login 扫码登录（自动更新 .sessdata），"
+          "或手动更新项目根目录的 .sessdata")
     if required:
         print("✗ 全量采集 / 评论重采需要有效的登录状态，已停止运行\n")
         return False

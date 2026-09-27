@@ -2,3 +2,4 @@ httpx>=0.28
 jieba>=0.42
 matplotlib>=3.8
 Pillow>=10.0  # 可选：高潮帧裁剪，缺失时保存整张精灵图
+segno>=1.6  # 扫码登录生成二维码

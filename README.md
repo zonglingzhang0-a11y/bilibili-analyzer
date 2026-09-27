@@ -22,7 +22,13 @@ pip install -r requirements.txt
 - 环境变量 `BILI_SESSDATA=<你的 SESSDATA>`
 - 或在项目根目录创建 `.sessdata` 文件，写入 SESSDATA 的值（已在 `.gitignore` 中忽略）
 
-获取方式：浏览器登录 B站 → 开发者工具 → Cookie → 复制 `SESSDATA`。SESSDATA 会过期，程序启动时会检查登录状态并提示。自检：
+最方便的是**扫码登录**：运行下面的命令，用 B站 App 扫描弹出的二维码并确认，程序会自动把新凭证写入 `.sessdata`（凭证不会显示在屏幕上）：
+
+```bash
+python bili_auth.py --login
+```
+
+也可以手动获取：浏览器登录 B站 → 开发者工具 → Cookie → 复制 `SESSDATA`。SESSDATA 会过期，程序启动时会检查登录状态；全量采集和评论重采在未登录时会拒绝运行。自检：
 
 ```bash
 python bili_auth.py
