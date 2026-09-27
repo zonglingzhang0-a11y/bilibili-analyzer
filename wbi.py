@@ -28,9 +28,27 @@ class WbiSigner:
     """B站 Wbi 签名器，缓存 key 并自动刷新"""
 
     def __init__(self):
-        self._client = make_client({**BASE_HEADERS, "Cookie": "buvid3=auto"}, timeout=10)
+        self._client = make_client(BASE_HEADERS, timeout=10)
         self._mixin_key: str = ""
         self._last_refresh = 0.0
+        self._has_buvid = False
+
+    def _ensure_buvid(self):
+        """设置设备标识 buvid3/buvid4
+
+        实测不带 buvid3 的请求会被风控拦下（-352），伪造的 buvid3 时好时坏，
+        带上 B站 下发的真实 buvid3 则稳定通过。获取失败时退回伪造值。
+        """
+        if self._has_buvid:
+            return
+        try:
+            data = self._client.get("https://api.bilibili.com/x/frontend/finger/spi").json().get("data") or {}
+        except Exception:
+            data = {}
+        self._client.cookies.set("buvid3", data.get("b_3") or "auto", domain=".bilibili.com")
+        if data.get("b_4"):
+            self._client.cookies.set("buvid4", data["b_4"], domain=".bilibili.com")
+        self._has_buvid = True
 
     def _refresh_key(self):
         """从 B站 nav 接口获取并计算 mixin key"""
@@ -55,8 +73,10 @@ class WbiSigner:
         return self._mixin_key
 
     def invalidate(self):
-        """丢弃缓存的 mixin_key，下次签名时强制重新获取"""
+        """丢弃缓存的 mixin_key 和设备标识，下次请求时重新获取（遇到 -352 风控时调用）"""
         self._mixin_key = ""
+        self._has_buvid = False
+        self._client.cookies.clear()
 
     def sign(self, params: dict) -> dict:
         """对请求参数进行 Wbi 签名，返回添加了 w_rid 和 wts 的新参数字典
@@ -86,6 +106,7 @@ class WbiSigner:
 
     def signed_get(self, url: str, params: dict = None, **kwargs) -> httpx.Response:
         """发送带 Wbi 签名的 GET 请求"""
+        self._ensure_buvid()
         params = self.sign(params or {})
         return self._client.get(url, params=params, **kwargs)
 
