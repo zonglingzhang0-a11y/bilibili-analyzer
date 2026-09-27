@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --pos: #2a78d6; --neu: #d3d1ca; --neg: #e34948;
+  --wash: rgba(42,120,214,0.08); --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
+    --wash: rgba(57,135,229,0.12); --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
+  --wash: rgba(57,135,229,0.12); --shadow: none;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+a { color: var(--s1); text-decoration: none; } a:hover { text-decoration: underline; }
+main { max-width: 1120px; margin: 0 auto; padding: 0 20px 80px; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* 顶部 */
+.hero { padding: 40px 0 8px; }
+.hero .kicker { color: var(--muted); font-size: 13px; letter-spacing: .02em; }
+.hero h1 { font-size: 30px; line-height: 1.25; margin: 6px 0 4px; font-weight: 650; }
+.hero .sub { color: var(--ink-2); font-size: 14px; }
+nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); margin: 20px -20px 0; padding: 0 20px; }
+nav .links { max-width: 1120px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto; }
+nav a { color: var(--ink-2); padding: 12px 10px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--ink); text-decoration: none; border-bottom-color: var(--axis); }
+
+section { margin-top: 44px; }
+section > h2 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-width: 760px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+
+/* 指标 */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 24px; }
+.kpi { padding: 16px 18px; }
+.kpi .label { color: var(--muted); font-size: 12px; }
+.kpi .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
+.kpi .delta { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+
+/* 情感条 */
+.senti { display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; }
+.senti span { display: block; height: 100%; }
+.senti .p { background: var(--pos); } .senti .n { background: var(--neu); } .senti .x { background: var(--neg); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend i.line { height: 2px; width: 14px; border-radius: 1px; vertical-align: 3px; }
+
+/* 看点 */
+.insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.insight { padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
+.insight .tag { font-size: 12px; color: var(--s1); font-weight: 600; letter-spacing: .02em; }
+.insight .head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.insight .title { font-weight: 600; font-size: 16px; line-height: 1.4; }
+.insight .value { font-size: 22px; font-weight: 650; white-space: nowrap; }
+.insight .text { color: var(--ink-2); font-size: 14px; }
+.insight img { width: 100%; border-radius: 8px; display: block; }
+.insight .open { align-self: flex-start; font-size: 13px; background: none; border: 0; padding: 0; color: var(--s1); cursor: pointer; }
+blockquote { margin: 0; padding: 10px 12px; background: var(--wash); border-radius: 8px; font-size: 14px; }
+blockquote .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink-2); }
+
+/* 视频墙 */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+.controls label { color: var(--ink-2); font-size: 13px; }
+select, input[type=search] { font: inherit; font-size: 14px; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
+input[type=search] { min-width: 220px; }
+.wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+.vcard { overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: transform .12s ease, border-color .12s; text-align: left; font: inherit; color: inherit; padding: 0; }
+.vcard:hover, .vcard:focus-visible { transform: translateY(-2px); border-color: var(--s1); outline: none; }
+.vcard .cover { aspect-ratio: 16/10; background: var(--grid) center/cover no-repeat; position: relative; }
+.vcard .rank { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.62); color: #fff; font-size: 12px; padding: 1px 7px; border-radius: 6px; }
+.vcard .metric { position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,.62); color: #fff; font-size: 12px; padding: 1px 7px; border-radius: 6px; }
+.vcard .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.vcard .t { font-weight: 600; font-size: 14px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.vcard .o { color: var(--muted); font-size: 12px; }
+.vcard .stats { display: flex; gap: 10px; color: var(--ink-2); font-size: 12px; margin-top: auto; }
+
+/* 表格与条形 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.tw { overflow-x: auto; }
+.bars { display: flex; flex-direction: column; gap: 10px; }
+.bar-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 10px; align-items: center; }
+.bar-row .label { font-size: 13px; line-height: 1.4; }
+.bar-row .label small { color: var(--muted); }
+.bar-row .track { height: 8px; background: var(--grid); border-radius: 4px; margin-top: 5px; }
+.bar-row .fill { height: 100%; background: var(--s1); border-radius: 4px; }
+.bar-row .v { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.pad { padding: 18px 20px; }
+.pad h3 { margin: 0 0 12px; font-size: 15px; }
+.note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--wash); color: var(--s1); margin-left: 6px; }
+
+/* 图表 */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .axis text { fill: var(--muted); font-size: 11px; }
+.chart .grid line { stroke: var(--grid); stroke-width: 1; }
+.chart .base { stroke: var(--axis); stroke-width: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 120px; max-width: 260px; z-index: 5; }
+.tip .v { font-size: 14px; font-weight: 650; }
+.tip .k { color: var(--muted); }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.tip .key { width: 12px; height: 2px; border-radius: 1px; }
+.tip ul { margin: 4px 0 0; padding-left: 16px; color: var(--ink-2); }
+
+/* 详情抽屉 */
+.drawer { position: fixed; inset: 0; z-index: 50; display: none; }
+.drawer.open { display: block; }
+.drawer .shade { position: absolute; inset: 0; background: rgba(0,0,0,.45); }
+.drawer .panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(920px, 100%); background: var(--page);
+  overflow-y: auto; padding: 24px 28px 60px; box-shadow: -8px 0 32px rgba(0,0,0,.2); }
+.drawer .close { position: sticky; top: 0; float: right; font-size: 22px; line-height: 1; border: 1px solid var(--border);
+  background: var(--surface); color: var(--ink); border-radius: 8px; width: 36px; height: 36px; cursor: pointer; }
+.dhead { display: grid; grid-template-columns: 220px 1fr; gap: 18px; align-items: start; }
+.dhead img { width: 100%; border-radius: 10px; display: block; }
+.dhead h2 { margin: 0 0 6px; font-size: 20px; line-height: 1.35; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-2); font-size: 13px; margin: 8px 0; }
+.facts b { color: var(--ink); font-weight: 600; }
+.block { margin-top: 26px; }
+.block h3 { font-size: 16px; margin: 0 0 4px; }
+.block .lede { color: var(--ink-2); font-size: 13px; margin: 0 0 10px; }
+.peaks { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.peak { padding: 10px; }
+.peak img { width: 100%; border-radius: 6px; display: block; margin-bottom: 8px; }
+.peak .when { font-weight: 600; }
+.peak .samples { color: var(--ink-2); font-size: 13px; margin: 4px 0; }
+.kw { display: grid; grid-template-columns: 110px 1fr; gap: 6px 14px; font-size: 14px; }
+.kw .w { font-weight: 600; } .kw .w small { color: var(--muted); font-weight: 400; }
+.kw .e { color: var(--ink-2); }
+.quotes { display: grid; gap: 10px; }
+@media (max-width: 640px) {
+  .dhead { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 24px; } .drawer .panel { padding: 16px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div class="kicker" id="kicker"></div>
+    <h1 id="headline"></h1>
+    <div class="sub" id="subline"></div>
+    <div class="kpis" id="kpis"></div>
+  </header>
+  <nav><div class="links" id="nav"></div></nav>
+
+  <section id="insights-sec">
+    <h2>本期看点</h2>
+    <p class="lede">从 49 个视频的评论和弹幕里自动找出来的几条结论，每条都附证据。点「查看视频」看详情。</p>
+    <div class="insights" id="insights"></div>
+  </section>
+
+  <section id="wall-sec">
+    <h2>视频一览</h2>
+    <p class="lede">色条是评论情感：<span class="legend" style="display:inline-flex"><span><i style="background:var(--pos)"></i>正面</span><span><i style="background:var(--neu)"></i>中性</span><span><i style="background:var(--neg)"></i>负面</span></span>。点卡片查看弹幕热度曲线、名场面截图、观众在说什么。</p>
+    <div class="controls">
+      <label>排序 <select id="sort"></select></label>
+      <input type="search" id="search" placeholder="搜索标题或 UP 主">
+      <span class="note" id="count" style="margin:0"></span>
+    </div>
+    <div class="wall" id="wall"></div>
+    <details style="margin-top:16px"><summary style="cursor:pointer;color:var(--ink-2);font-size:14px">查看全部数据表</summary>
+      <div class="card tw" style="margin-top:10px"><table id="table"></table></div>
+    </details>
+  </section>
+
+  <section id="radar-sec">
+    <h2>梗雷达</h2>
+    <p class="lede" id="radar-lede"></p>
+    <div id="radar"></div>
+  </section>
+
+  <section id="overlap-sec">
+    <h2>观众重合</h2>
+    <p class="lede" id="overlap-lede"></p>
+    <div class="card pad"><div class="bars" id="overlap"></div>
+      <div class="note">重合度 = 共同评论者人数 ÷ 两个视频中评论人数较少的一方。只统计在两个视频下都发过一级评论的人，不涉及具体用户。</div></div>
+  </section>
+
+  <section id="life-sec">
+    <h2>热度寿命与活跃时段</h2>
+    <p class="lede">「评论半衰期」是一半评论在发布后多少小时内发出，越短说明热度来得快去得也快。</p>
+    <div class="split">
+      <div class="card pad"><h3>来得最快 / 最持久</h3><div class="bars" id="life"></div>
+        <div class="note" id="life-note"></div></div>
+      <div class="card pad"><h3>评论在一天中的分布</h3><div class="legend" id="hours-legend" style="margin-bottom:6px"></div><div class="chart" id="hours"></div>
+        <div class="note" id="hours-note"></div></div>
+    </div>
+  </section>
+
+  <section id="compare-sec">
+    <h2>和上一期比</h2>
+    <p class="lede" id="compare-lede"></p>
+    <div class="split">
+      <div class="card tw"><table id="compare"></table></div>
+      <div class="card pad"><h3>上榜常客</h3><div id="regulars"></div></div>
+    </div>
+  </section>
+
+  <section id="method-sec">
+    <h2>数据与方法</h2>
+    <div class="card pad" style="font-size:14px;color:var(--ink-2)" id="method"></div>
+  </section>
+</main>
+
+<div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
+  <div class="shade" data-close></div>
+  <div class="panel" id="panel"></div>
+</div>
+
+<script id="data" type="application/json">{{DATA}}</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const byAid = new Map(D.videos.map(v => [v.aid, v]));
+const $ = id => document.getElementById(id);
+const fmt = n => n == null ? "–" : Math.round(n).toLocaleString("zh-CN");
+const pct = (x, d = 1) => x == null ? "–" : (x * 100).toFixed(d) + "%";
+const wan = n => n >= 1e8 ? (n / 1e8).toFixed(2) + " 亿" : n >= 10000 ? (n / 10000).toFixed(n >= 1e6 ? 0 : 1) + " 万" : fmt(n);
+const hours = h => h == null ? "–" : h < 10 ? h.toFixed(1) + " 小时" : Math.round(h) + " 小时";
+
+// 创建元素：字符串一律作为文本插入（数据来自评论等不可信内容）
+function h(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") node.className = v;
+    else if (k === "style") node.style.cssText = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+const svg = (tag, attrs) => {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  return node;
+};
+
+function sentiBar(s, height) {
+  const total = (s.positive + s.neutral + s.negative) || 1;
+  const bar = h("div", { class: "senti", style: height ? `height:${height}px` : "",
+    title: `正面 ${pct(s.positive / total)} · 中性 ${pct(s.neutral / total)} · 负面 ${pct(s.negative / total)}` });
+  [["p", s.positive], ["n", s.neutral], ["x", s.negative]].forEach(([c, v]) => {
+    if (v > 0) bar.append(h("span", { class: c, style: `flex:${v}` }));
+  });
+  return bar;
+}
+function quote(q) {
+  if (!q || !q.text) return null;
+  const meta = [q.like != null ? `👍 ${fmt(q.like)}` : null, q.replies ? `💬 ${fmt(q.replies)} 条回复` : null].filter(Boolean).join(" · ");
+  return h("blockquote", {}, "「", q.text, "」", meta ? h("div", { class: "meta" }, meta) : null);
+}
+
+/* ── 通用折线图：十字准线 + 悬停提示，可多条线 ── */
+function lineChart(host, opt) {
+  const { series, xLabel, tooltipExtra, markers = [], yFormat = fmt, height = 200, area = true } = opt;
+  const n = series[0].values.length;
+  if (!n) { host.append(h("div", { class: "note" }, "没有数据")); return; }
+  const tip = h("div", { class: "tip", style: "display:none" });
+  host.append(tip);
+  let svgEl;
+  function draw() {
+    if (svgEl) svgEl.remove();
+    const W = Math.max(host.clientWidth, 280), H = height;
+    const m = { l: 44, r: series.length > 1 ? 58 : 12, t: 12, b: 26 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const maxY = Math.max(1e-9, ...series.flatMap(s => s.values));
+    const step = niceStep(maxY / 4);
+    const top = Math.ceil(maxY / step) * step;
+    const x = i => m.l + (n === 1 ? iw / 2 : i / (n - 1) * iw);
+    const y = v => m.t + ih - v / top * ih;
+    svgEl = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" });
+    const grid = svg("g", { class: "grid" }), axis = svg("g", { class: "axis" });
+    for (let v = 0; v <= top + 1e-9; v += step) {
+      grid.append(svg("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
+      const t = svg("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }); t.textContent = yFormat(v); axis.append(t);
+    }
+    const ticks = Math.min(7, n);
+    for (let k = 0; k < ticks; k++) {
+      const i = Math.round(k / Math.max(1, ticks - 1) * (n - 1));
+      const t = svg("text", { x: x(i), y: H - 6, "text-anchor": k === 0 ? "start" : k === ticks - 1 ? "end" : "middle" });
+      t.textContent = xLabel(i); axis.append(t);
+    }
+    svgEl.append(grid, axis, svg("line", { class: "base", x1: m.l, x2: W - m.r, y1: y(0), y2: y(0) }));
+    series.forEach(s => {
+      const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+      if (area && series.length === 1)
+        svgEl.append(svg("path", { d: `M${x(0)},${y(0)}L${pts.join("L")}L${x(n - 1)},${y(0)}Z`, fill: s.color, opacity: 0.12 }));
+      svgEl.append(svg("path", { d: "M" + pts.join("L"), fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+    if (series.length > 1) {
+      const ends = series.map(s => ({ s, y: y(s.values[n - 1]) })).sort((p, q) => p.y - q.y);
+      for (let k = 1; k < ends.length; k++) ends[k].y = Math.max(ends[k].y, ends[k - 1].y + 13);
+      ends.forEach(({ s, y: ly }) => {
+        const t = svg("text", { x: W - m.r + 4, y: ly + 4, fill: "var(--ink-2)", "font-size": 11 });
+        t.textContent = s.name; svgEl.append(t);
+      });
+    }
+    markers.forEach(mk => {
+      const v = series[0].values[mk.i] || 0;
+      svgEl.append(svg("circle", { cx: x(mk.i), cy: y(v), r: 5, fill: series[0].color, stroke: "var(--surface)", "stroke-width": 2 }));
+      if (mk.label) { const t = svg("text", { x: x(mk.i), y: y(v) - 10, "text-anchor": "middle", fill: "var(--ink-2)", "font-size": 11 }); t.textContent = mk.label; svgEl.append(t); }
+    });
+    const cross = svg("line", { y1: m.t, y2: m.t + ih, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" });
+    const dots = series.map(s => svg("circle", { r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }));
+    svgEl.append(cross, ...dots);
+    const hit = svg("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+    svgEl.append(hit);
+    const move = ev => {
+      const r = svgEl.getBoundingClientRect();
+      const px = (ev.clientX - r.left) * W / r.width;
+      const i = Math.max(0, Math.min(n - 1, Math.round((px - m.l) / iw * (n - 1))));
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+      dots.forEach((d, k) => { d.setAttribute("cx", x(i)); d.setAttribute("cy", y(series[k].values[i])); d.setAttribute("visibility", "visible"); });
+      tip.replaceChildren(
+        ...series.map(s => h("div", { class: "row" },
+          series.length > 1 ? h("span", { class: "key", style: `background:${s.color}` }) : null,
+          h("span", { class: "v" }, yFormat(s.values[i])), h("span", { class: "k" }, s.name))),
+        h("div", { class: "k" }, xLabel(i)),
+        tooltipExtra ? tooltipExtra(i) : null);
+      tip.style.display = "block";
+      const tx = x(i) / W * r.width, tw = tip.offsetWidth;
+      tip.style.left = Math.min(Math.max(0, tx + 12), r.width - tw) + "px";
+      tip.style.top = "0px";
+    };
+    hit.addEventListener("pointermove", move);
+    hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); });
+    host.prepend(svgEl);
+  }
+  draw();
+  new ResizeObserver(() => draw()).observe(host);
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+}
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+/* ── 顶部 ── */
+function renderHeader() {
+  const s = D.summary, ser = D.series || {};
+  $("kicker").textContent = `B站每周必看 · 周报 · 生成于 ${D.generated_at}`;
+  $("headline").textContent = ser.number ? `第 ${ser.number} 期：${ser.name || ""}` : "每周必看周报";
+  $("subline").textContent = `${s.videos} 个视频 · ${fmt(s.comments)} 条一级评论（全量） · ${fmt(s.danmaku)} 条弹幕`;
+  const prev = D.previous && D.previous.summary;
+  const delta = (cur, old, fn) => prev ? `上期 ${fn(old)}` : "";
+  const tiles = [
+    ["总播放", wan(s.views), delta(s.views, prev && prev.views, wan)],
+    ["一级评论", wan(s.comments), delta(s.comments, prev && prev.comments, wan)],
+    ["正面评论占比", pct(s.positive_rate), delta(0, prev && prev.positive_rate, pct)],
+    ["负面评论占比", pct(s.negative_rate), delta(0, prev && prev.negative_rate, pct)],
+    ["弹幕密度中位数", `${s.median_density.toFixed(0)} 条/分`, delta(0, prev && prev.median_density, v => v.toFixed(0) + " 条/分")],
+    ["评论半衰期中位数", hours(s.median_half_life), delta(0, prev && prev.median_half_life, hours)],
+  ];
+  $("kpis").replaceChildren(...tiles.map(([l, v, d]) => h("div", { class: "card kpi" },
+    h("div", { class: "label" }, l), h("div", { class: "value" }, v), d ? h("div", { class: "delta" }, d) : null)));
+  const links = [["insights-sec", "本期看点"], ["wall-sec", "视频一览"], ["radar-sec", "梗雷达"], ["overlap-sec", "观众重合"],
+    ["life-sec", "热度寿命"], ["compare-sec", "和上期比"], ["method-sec", "数据与方法"]];
+  $("nav").replaceChildren(...links.map(([id, t]) => h("a", { href: "#" + id }, t)));
+}
+
+/* ── 看点 ── */
+function renderInsights() {
+  $("insights").replaceChildren(...D.insights.map(it => {
+    const v = it.aid ? byAid.get(it.aid) : null;
+    return h("article", { class: "card insight" },
+      h("div", { class: "tag" }, it.tag),
+      h("div", { class: "head" }, h("div", { class: "title" }, it.word ? `「${it.word}」` : (v ? v.title : "")),
+        h("div", { class: "value" }, it.value)),
+      it.image ? h("img", { src: it.image, alt: "名场面截图" }) : null,
+      h("div", { class: "text" }, it.text),
+      it.samples && it.samples.length ? h("div", { class: "chips" }, it.samples.map(s => h("span", { class: "chip" }, s))) : null,
+      quote(it.quote),
+      h("div", { style: "display:flex;gap:14px" },
+        v ? h("button", { class: "open", onclick: () => openDetail(v.aid) }, "查看视频 →") : null,
+        it.link ? h("a", { href: it.link, target: "_blank", rel: "noopener", style: "font-size:13px" }, "到 B站 看这一刻 ↗") : null));
+  }));
+}
+
+/* ── 视频墙 ── */
+const SORTS = [
+  ["view", "播放量", v => v.view, v => wan(v.view) + " 播放"],
+  ["comments", "一级评论数", v => v.comments, v => fmt(v.comments) + " 评论"],
+  ["danmaku_density", "弹幕密度", v => v.danmaku_density, v => v.danmaku_density.toFixed(0) + " 条/分"],
+  ["positive_rate", "好评率", v => v.comments >= D.min_comments ? v.positive_rate : -1, v => "好评 " + pct(v.positive_rate)],
+  ["controversy", "争议指数", v => v.comments >= D.min_comments ? v.controversy : -1, v => "争议 " + v.controversy.toFixed(0)],
+  ["half_life", "评论半衰期（短→长）", v => v.half_life == null ? -Infinity : -v.half_life, v => "半衰期 " + hours(v.half_life)],
+];
+function renderWall() {
+  const sel = $("sort");
+  sel.replaceChildren(...SORTS.map(([k, label]) => h("option", { value: k }, label)));
+  const draw = () => {
+    const [, , key, badge] = SORTS.find(s => s[0] === sel.value);
+    const q = $("search").value.trim().toLowerCase();
+    const list = [...D.videos].sort((a, b) => key(b) - key(a))
+      .filter(v => !q || v.title.toLowerCase().includes(q) || (v.owner || "").toLowerCase().includes(q));
+    $("count").textContent = `${list.length} 个视频`;
+    $("wall").replaceChildren(...list.map((v, i) => h("button", { class: "card vcard", onclick: () => openDetail(v.aid), "aria-label": v.title },
+      h("div", { class: "cover", style: v.cover ? `background-image:url(${v.cover})` : "" },
+        h("span", { class: "rank" }, "#" + (i + 1)), h("span", { class: "metric" }, badge(v))),
+      h("div", { class: "body" },
+        h("div", { class: "t" }, v.title), h("div", { class: "o" }, v.owner),
+        sentiBar(v.sentiment),
+        h("div", { class: "stats num" }, h("span", {}, "▶ " + wan(v.view)), h("span", {}, "💬 " + wan(v.comments)), h("span", {}, "弹幕 " + wan(v.danmaku)))))));
+  };
+  sel.addEventListener("change", draw);
+  $("search").addEventListener("input", draw);
+  draw();
+  const cols = [["视频", v => v.title], ["UP 主", v => v.owner], ["播放", v => fmt(v.view), 1], ["一级评论", v => fmt(v.comments), 1],
+    ["楼中楼", v => fmt(v.sub_replies), 1], ["好评率", v => pct(v.positive_rate), 1], ["差评率", v => pct(v.negative_rate), 1],
+    ["争议指数", v => v.controversy.toFixed(0), 1], ["弹幕", v => fmt(v.danmaku), 1], ["弹幕密度/分", v => v.danmaku_density.toFixed(0), 1],
+    ["半衰期", v => hours(v.half_life), 1], ["深夜评论", v => pct(v.late_night), 1]];
+  $("table").replaceChildren(
+    h("thead", {}, h("tr", {}, cols.map(([t, , n]) => h("th", { class: n ? "n" : "" }, t)))),
+    h("tbody", {}, [...D.videos].sort((a, b) => b.view - a.view).map(v =>
+      h("tr", {}, cols.map(([, f, n]) => h("td", { class: n ? "n" : "" }, f(v)))))));
+}
+
+/* ── 梗雷达 ── */
+function renderRadar() {
+  const r = D.radar;
+  if (!r) {
+    $("radar-lede").textContent = "需要上一期的数据才能对比出新梗。采集上一期后重新生成周报即可看到。";
+    return;
+  }
+  const prevNo = D.previous.series && D.previous.series.number;
+  $("radar-lede").textContent = `本期评论和弹幕里，在至少 3 个视频中出现、而且比第 ${prevNo} 期明显变多的词。只出现在单个视频里的通常是那个视频的话题词，不算梗。`;
+  const max = Math.max(...r.rising.map(x => x.now), 1);
+  const rising = h("div", { class: "card pad" }, h("h3", {}, "本周升温"),
+    h("div", { class: "bars" }, r.rising.map(x => h("div", { class: "bar-row" },
+      h("div", { class: "label" },
+        h("b", {}, x.word), x.is_new ? h("span", { class: "badge" }, "新") : null,
+        h("small", {}, `  出现在 ${x.videos} 个视频 · 上期 ${fmt(x.before)} 次`),
+        x.example ? h("div", { style: "color:var(--ink-2);font-size:12px" }, "例：", x.example) : null,
+        h("div", { class: "track" }, h("div", { class: "fill", style: `width:${x.now / max * 100}%` }))),
+      h("div", { class: "v" }, fmt(x.now) + " 次")))));
+  const fading = h("div", { class: "card pad" }, h("h3", {}, "上期流行、本期降温"),
+    r.fading.length ? h("div", { class: "tw" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "词"), h("th", { class: "n" }, `第 ${prevNo} 期`), h("th", { class: "n" }, "本期"))),
+      h("tbody", {}, r.fading.map(x => h("tr", {}, h("td", {}, x.word), h("td", { class: "n" }, fmt(x.before)), h("td", { class: "n" }, fmt(x.now)))))))
+      : h("div", { class: "note" }, "没有明显降温的词"));
+  $("radar").replaceChildren(h("div", { class: "split" }, rising, fading));
+}
+
+/* ── 观众重合 ── */
+function renderOverlap() {
+  const o = D.overlap;
+  $("overlap-lede").textContent = `本期共有 ${fmt(o.users)} 人发过一级评论，其中 ${fmt(o.multi_video_users)} 人在 3 个及以上的视频下都评论过，最多的一人评论了 ${o.max_videos_per_user} 个视频。下面是观众群体最接近的几组视频。`;
+  $("overlap").replaceChildren(...o.pairs.map(p => {
+    const a = byAid.get(p.a), b = byAid.get(p.b);
+    return h("div", { class: "bar-row" },
+      h("div", { class: "label" }, a.title, h("small", {}, "  ⇄  "), b.title,
+        h("small", {}, `  · 共同评论者 ${fmt(p.shared)} 人`),
+        h("div", { class: "track" }, h("div", { class: "fill", style: `width:${p.ratio * 100}%` }))),
+      h("div", { class: "v" }, pct(p.ratio, 0)));
+  }));
+}
+
+/* ── 热度寿命 ── */
+function renderLife() {
+  const list = D.videos.filter(v => v.comments >= D.min_comments && v.half_life != null).sort((a, b) => a.half_life - b.half_life);
+  const pick = [...list.slice(0, 5), ...list.slice(-5)];
+  const max = Math.max(...pick.map(v => v.half_life), 1);
+  const row = v => h("div", { class: "bar-row" },
+    h("div", { class: "label" }, h("a", { href: "#", onclick: e => { e.preventDefault(); openDetail(v.aid); } }, v.title),
+      h("div", { class: "track" }, h("div", { class: "fill", style: `width:${v.half_life / max * 100}%` }))),
+    h("div", { class: "v" }, hours(v.half_life)));
+  $("life").replaceChildren(h("div", { class: "note", style: "margin:0" }, "来得最快"), ...list.slice(0, 5).map(row),
+    h("div", { class: "note", style: "margin:8px 0 0" }, "最持久"), ...list.slice(-5).reverse().map(row));
+  $("life-note").textContent = `只统计一级评论不少于 ${D.min_comments} 条的 ${list.length} 个视频。`;
+
+  const series = [{ name: `第 ${D.series.number || ""} 期`, values: D.summary.hour_share, color: "var(--s1)" }];
+  if (D.previous) series.push({ name: `第 ${D.previous.series.number || ""} 期`, values: D.previous.summary.hour_share, color: "var(--s2)" });
+  $("hours-legend").replaceChildren(...series.map(s => h("span", {}, h("i", { class: "line", style: `background:${s.color}` }), s.name)));
+  lineChart($("hours"), { series, xLabel: i => `${i}:00`, yFormat: v => (v * 100).toFixed(1) + "%", area: false, height: 210 });
+  $("hours-note").textContent = `凌晨 0～6 点的评论占 ${pct(D.summary.late_night)}` + (D.previous ? `（上期 ${pct(D.previous.summary.late_night)}）` : "") + "。";
+}
+
+/* ── 和上期比 ── */
+function renderCompare() {
+  if (!D.previous) {
+    $("compare-lede").textContent = "没有找到上一期的数据。";
+    return;
+  }
+  const a = D.summary, b = D.previous.summary;
+  const prevName = D.previous.series.name ? `（${D.previous.series.name}）` : "";
+  $("compare-lede").textContent = `和第 ${D.previous.series.number} 期${prevName}的整体对比。比例类指标的变化用百分点表示。`;
+  const rows = [["视频数", a.videos, b.videos, fmt], ["总播放", a.views, b.views, wan], ["一级评论", a.comments, b.comments, fmt],
+    ["每个视频的评论（中位数）", a.median_comments, b.median_comments, fmt], ["弹幕", a.danmaku, b.danmaku, fmt],
+    ["弹幕密度中位数（条/分）", a.median_density, b.median_density, v => v.toFixed(0)],
+    ["正面评论占比", a.positive_rate, b.positive_rate, v => pct(v), true], ["负面评论占比", a.negative_rate, b.negative_rate, v => pct(v), true],
+    ["凌晨评论占比", a.late_night, b.late_night, v => pct(v), true], ["评论半衰期中位数", a.median_half_life, b.median_half_life, hours]];
+  const arrow = c => c > 0 ? "▲ " : c < 0 ? "▼ " : "";
+  const change = (x, y, isRate) => {
+    if (isRate) { const d = (x - y) * 100; return arrow(d) + Math.abs(d).toFixed(1) + " 个百分点"; }
+    const c = y ? (x - y) / y * 100 : 0; return arrow(c) + Math.abs(c).toFixed(1) + "%";
+  };
+  $("compare").replaceChildren(
+    h("thead", {}, h("tr", {}, h("th", {}, "指标"), h("th", { class: "n" }, "本期"), h("th", { class: "n" }, "上期"), h("th", { class: "n" }, "变化"))),
+    h("tbody", {}, rows.map(([l, x, y, f, isRate]) =>
+      h("tr", {}, h("td", {}, l), h("td", { class: "n" }, f(x)), h("td", { class: "n" }, f(y)),
+        h("td", { class: "n" }, change(x, y, isRate))))));
+  const reg = D.regulars;
+  $("regulars").replaceChildren(reg.length
+    ? h("div", { class: "bars" }, reg.map(r => h("div", {},
+        h("b", {}, r.owner), h("div", { style: "font-size:13px;color:var(--ink-2)" }, "本期：",
+          h("a", { href: "#", onclick: e => { e.preventDefault(); openDetail(r.aid); } }, r.now)),
+        h("div", { style: "font-size:13px;color:var(--muted)" }, "上期：", r.before.join("；")))))
+    : h("div", { class: "note" }, "这两期没有重复上榜的 UP 主。"));
+}
+
+/* ── 方法 ── */
+function renderMethod() {
+  const items = [
+    "评论为一级评论全量采集（按时间排序翻到最后一页）；接口给出的评论总数包含楼中楼回复，楼中楼只计数，不参与内容分析。",
+    "情感分析基于词典和否定词规则，适合在视频之间比较倾向，不适合逐条精确判断；大量评论没有明显情感词，会被判为中性。",
+    `好评率、争议指数、评论半衰期、深夜评论等排行只统计一级评论不少于 ${D.min_comments} 条的视频，避免小样本的比例失真。`,
+    "争议指数 = 负面评论占比（%）×（1 + 平均每条一级评论的楼中楼回复数）：差评多、而且吵得凶的视频数值高。",
+    "「观众在说什么」取每个视频相对其他视频最有区分度的词（TF-IDF），并附一条包含该词的高赞评论。",
+    "梗雷达统计评论和弹幕的词频，要求本期出现至少 40 次、分布在至少 3 个视频中，并且频率是上一期的 3 倍以上。",
+    "弹幕是播放器当前显示的弹幕池，少于历史弹幕总数；弹幕热度曲线按 10 秒一段统计。",
+  ];
+  $("method").replaceChildren(h("ul", { style: "margin:0;padding-left:18px" }, items.map(t => h("li", { style: "margin:4px 0" }, t))),
+    h("div", { class: "note" }, `数据目录：${D.run_dir}`));
+}
+
+/* ── 视频详情 ── */
+function openDetail(aid) {
+  const v = byAid.get(aid);
+  if (!v) return;
+  const total = v.sentiment.positive + v.sentiment.neutral + v.sentiment.negative || 1;
+  const heatHost = h("div", { class: "chart" }), hourlyHost = h("div", { class: "chart" });
+  const lastHour = (() => { let s = 0, t = v.hourly.reduce((a, b) => a + b, 0), cut = v.hourly.length;
+    for (let i = 0; i < v.hourly.length; i++) { s += v.hourly[i]; if (t && s / t >= 0.97) { cut = Math.max(24, i + 1); break; } } return cut; })();
+  $("panel").replaceChildren(
+    h("button", { class: "close", "data-close": true, "aria-label": "关闭" }, "×"),
+    h("div", { class: "dhead" },
+      v.cover ? h("img", { src: v.cover, alt: "封面" }) : h("div"),
+      h("div", {},
+        h("h2", { id: "d-title" }, v.title),
+        h("div", { style: "color:var(--ink-2)" }, v.owner, v.pubdate ? ` · 发布于 ${v.pubdate}` : ""),
+        h("div", { class: "facts num" },
+          h("span", {}, "播放 ", h("b", {}, wan(v.view))), h("span", {}, "点赞 ", h("b", {}, wan(v.like))),
+          h("span", {}, "投币 ", h("b", {}, wan(v.coin))), h("span", {}, "收藏 ", h("b", {}, wan(v.favorite))),
+          h("span", {}, "一级评论 ", h("b", {}, fmt(v.comments))), h("span", {}, "楼中楼 ", h("b", {}, fmt(v.sub_replies))),
+          h("span", {}, "弹幕 ", h("b", {}, fmt(v.danmaku)))),
+        sentiBar(v.sentiment, 10),
+        h("div", { class: "legend", style: "margin-top:6px" },
+          h("span", {}, h("i", { style: "background:var(--pos)" }), `正面 ${pct(v.sentiment.positive / total)}`),
+          h("span", {}, h("i", { style: "background:var(--neu)" }), `中性 ${pct(v.sentiment.neutral / total)}`),
+          h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(v.sentiment.negative / total)}`)),
+        v.link ? h("div", { style: "margin-top:10px" }, h("a", { href: v.link, target: "_blank", rel: "noopener" }, "在 B站 打开 ↗")) : null)),
+    h("div", { class: "block" }, h("h3", {}, "弹幕热度"),
+      h("p", { class: "lede" }, "每 10 秒的弹幕数量。把鼠标移到曲线上，可以看到那一刻刷得最多的弹幕；圆点是弹幕高潮。"),
+      heatHost),
+    v.peaks.length ? h("div", { class: "block" }, h("h3", {}, "名场面"),
+      h("div", { class: "peaks" }, v.peaks.map(p => h("div", { class: "card peak" },
+        p.image ? h("img", { src: p.image, alt: `${p.time} 截图`, loading: "lazy" }) : null,
+        h("div", { class: "when" }, `${p.time} · ${p.density} 条/6秒`),
+        h("div", { class: "samples" }, p.samples.join(" / ")),
+        p.link ? h("a", { href: p.link, target: "_blank", rel: "noopener", style: "font-size:13px" }, "到 B站 看这一刻 ↗") : null)))) : null,
+    h("div", { class: "block" }, h("h3", {}, "评论走势"),
+      h("p", { class: "lede" }, v.half_life != null ? `发布后每小时的一级评论数。一半的评论在发布后 ${hours(v.half_life)}内发出，${pct(v.late_night)} 发在凌晨 0～6 点。` : "发布后每小时的一级评论数。"),
+      hourlyHost),
+    v.keywords.length ? h("div", { class: "block" }, h("h3", {}, "观众在说什么"),
+      h("p", { class: "lede" }, "和本期其他视频相比，这个视频评论里最有特点的词，附一条包含该词的高赞评论。"),
+      h("div", { class: "kw" }, v.keywords.flatMap(k => [
+        h("div", { class: "w" }, k.word, h("br"), h("small", {}, fmt(k.count) + " 次")),
+        h("div", { class: "e" }, k.example || "")]))) : null,
+    h("div", { class: "block" }, h("h3", {}, "评论原文"),
+      h("div", { class: "quotes" },
+        v.top_comments.length ? h("div", { class: "note", style: "margin:0" }, "点赞最高") : null,
+        v.top_comments.map(quote),
+        v.best_positive ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的正面评论") : null, quote(v.best_positive),
+        v.best_negative ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的负面评论") : null, quote(v.best_negative))));
+  $("drawer").classList.add("open");
+  document.body.style.overflow = "hidden";
+  // 高潮按 6 秒窗口检测，曲线按 10 秒分段：窗口可能跨两段，标在较高的那一段上
+  const peakIdx = v.peaks.map(p => {
+    const a = Math.min(v.heat.length - 1, Math.floor(p.second / 10));
+    const b = Math.min(v.heat.length - 1, Math.floor((p.second + 5) / 10));
+    return { i: v.heat[b] > v.heat[a] ? b : a, label: p.time };
+  });
+  lineChart(heatHost, {
+    series: [{ name: "条弹幕", values: v.heat, color: "var(--s1)" }], xLabel: i => mmss(i * 10), markers: peakIdx,
+    tooltipExtra: i => v.heat_samples[i] && v.heat_samples[i].length ? h("ul", {}, v.heat_samples[i].map(s => h("li", {}, s))) : null,
+  });
+  lineChart(hourlyHost, { series: [{ name: "条评论", values: v.hourly.slice(0, lastHour), color: "var(--s1)" }],
+    xLabel: i => `第 ${i} 小时` });
+  $("panel").querySelector(".close").focus({ preventScroll: true });
+  $("panel").scrollTop = 0;
+}
+function closeDetail() {
+  $("drawer").classList.remove("open");
+  document.body.style.overflow = "";
+}
+$("drawer").addEventListener("click", e => { if (e.target.closest("[data-close]")) closeDetail(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
+
+renderHeader(); renderInsights(); renderWall(); renderRadar(); renderOverlap(); renderLife(); renderCompare(); renderMethod();
+</script>
+</body>
+</html>

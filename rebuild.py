@@ -152,6 +152,11 @@ def rebuild_run(run_dir: str) -> int:
     if len(all_stats) >= 2:
         _, report_path = write_summary(all_stats, run_dir, series_info)
         print(f"  📄 汇总报告: {report_path}")
+        try:
+            from weekly_report import generate_weekly_report
+            print(f"  📊 周报网页: {generate_weekly_report(run_dir)}")
+        except Exception as e:
+            print(f"  ⚠️ 周报网页生成失败: {e}")
     return len(all_stats)
 
 

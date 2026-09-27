@@ -32,6 +32,7 @@ from content_analyzer import (
 )
 from report_writer import generate_video_report, write_summary
 from rebuild import PRESERVED_KEYS, rebuild_all
+from weekly_report import generate_weekly_report
 from checkpoint_manager import CheckpointManager
 from adaptive_retry import (
     AdaptiveRateLimiter, RetryQueue,
@@ -716,6 +717,7 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
             print(f"  📄 汇总报告已更新: {spath}")
         except Exception as e:
             print(f"  ⚠️ 汇总报告失败: {e}")
+        _write_weekly_report(run_dir)
 
     print(f"\n本次完成 {done} 个，之前已完成跳过 {skipped} 个，失败 {len(failed)} 个"
           + ("（已暂停，未处理完）" if paused else ""))
@@ -725,6 +727,15 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
             print(f"    - {title[:50]}")
     else:
         print("✅ 评论重采完成!")
+
+
+def _write_weekly_report(run_dir: str):
+    """生成周报网页（自动与同一输出目录中的上一期对比）；失败不影响采集结果"""
+    try:
+        path = generate_weekly_report(run_dir)
+        print(f"📊 周报网页: {path}")
+    except Exception as e:
+        print(f"⚠️ 周报网页生成失败: {e}")
 
 
 def _print_rankings(comparison: dict):
@@ -1039,6 +1050,7 @@ def main():
             if len(all_stats) >= 3:
                 _print_rankings(comparison)
             print(f"\n📄 汇总报告: {summary_path}")
+        _write_weekly_report(output_base)
 
     # ── 错误汇总 ──
     retry_queue.print_summary()
