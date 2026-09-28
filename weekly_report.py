@@ -35,6 +35,7 @@ MEME_MIN_COUNT = 40         # 梗雷达：本期至少出现的次数
 MEME_MIN_VIDEOS = 3         # 梗雷达：至少在几个视频里出现（区分跨视频流行的梗和单个视频的话题词）
 OVERLAP_MIN_SHARED = 30     # 观众重合：至少共同观众人数
 LATE_NIGHT_HOURS = range(0, 6)
+MIN_COMPARE_COMPLETION = 0.9  # 作为对比对象的期，完成视频数至少占计划的比例
 
 
 # ── 小工具 ────────────────────────────────────────────
@@ -501,6 +502,9 @@ def find_previous_run(run_dir: str) -> str | None:
         if not number or number >= series:
             continue
         done = sum(1 for v in state.get("videos", {}).values() if v.get("state") == "completed")
+        planned = state.get("total_videos") or len(state.get("videos", {}))
+        if planned and done < MIN_COMPARE_COMPLETION * planned:
+            continue  # 还在采集中（或大量失败）的期不适合作为对比基准
         key = (number, done)
         if best_key is None or key > best_key:
             best, best_key = candidate, key

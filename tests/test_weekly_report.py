@@ -108,3 +108,13 @@ def test_find_previous_run_falls_back_to_nearest_earlier_issue(tmp_path):
     _make_run(tmp_path, "20260915_000000", 102, "xswl")
     current = _make_run(tmp_path, "20260908_000000", 101, "xswl")
     assert weekly_report.find_previous_run(str(current)) == str(older)
+
+
+def test_find_previous_run_skips_incomplete_issue(tmp_path):
+    complete = _make_run(tmp_path, "20260901_000000", 100, "awsl")
+    partial = _make_run(tmp_path, "20260908_000000", 101, "xswl")
+    state = json.loads((partial / "resume_state.json").read_text(encoding="utf-8"))
+    state["total_videos"] = 48                     # 计划 48 个，只完成了 3 个：仍在采集中
+    (partial / "resume_state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    current = _make_run(tmp_path, "20260915_000000", 102, "xswl")
+    assert weekly_report.find_previous_run(str(current)) == str(complete)

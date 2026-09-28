@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from main import RECOLLECT_STATE_FILE, RUN_START_MARKER
+from runs import RECOLLECT_STATE_FILE, RUN_START_MARKER
 
 LOG_CANDIDATES = ("run.log", "recollect.log")
 # 全量采集时一级评论约占接口评论总数（含楼中楼）的比例，用于估算当前视频的完成度

@@ -1,6 +1,7 @@
 import json
 
-import main
+import pipeline
+import runs
 from checkpoint_manager import CheckpointManager
 
 
@@ -35,15 +36,15 @@ def test_resumable_dir_only_matches_same_series(tmp_path):
     _make_run(tmp_path, "20260101_000000", series=99, completed=1)
     _make_run(tmp_path, "20260102_000000", series=100, completed=0)
 
-    assert main._find_resumable_dir(str(tmp_path), 99).endswith("20260101_000000")
-    assert main._find_resumable_dir(str(tmp_path), 101) is None
-    assert main._find_resumable_dir(str(tmp_path), None) is None
-    assert main._latest_run_dir(str(tmp_path)).endswith("20260102_000000")
+    assert runs.find_resumable_dir(str(tmp_path), 99).endswith("20260101_000000")
+    assert runs.find_resumable_dir(str(tmp_path), 101) is None
+    assert runs.find_resumable_dir(str(tmp_path), None) is None
+    assert runs.latest_run_dir(str(tmp_path)).endswith("20260102_000000")
 
 
 def test_video_dir_name_has_no_trailing_space_or_dot():
-    assert main._video_dir_name(1, "⚡️ 嘉 豪 の 小 曲 ⚡️") == "1_ 嘉 豪 の 小 曲"
-    assert main._video_dir_name(2, "结尾有点...") == "2_结尾有点"
+    assert pipeline.video_dir_name(1, "⚡️ 嘉 豪 の 小 曲 ⚡️") == "1_ 嘉 豪 の 小 曲"
+    assert pipeline.video_dir_name(2, "结尾有点...") == "2_结尾有点"
 
 
 def test_summary_includes_videos_completed_in_earlier_runs(tmp_path):
@@ -56,7 +57,7 @@ def test_summary_includes_videos_completed_in_earlier_runs(tmp_path):
         checkpoint.mark_video_complete(aid, f"{aid}_视频{aid}", {}, f"视频{aid}")
     checkpoint.mark_video_failed(3, "412", "视频3")
 
-    entries = main._completed_summary_entries(str(tmp_path), checkpoint)
+    entries = runs.completed_summary_entries(str(tmp_path), checkpoint)
 
     assert sorted((e["aid"], e["title"], e["views"]) for e in entries) == \
         [(1, "视频1", 100), (2, "视频2", 200)]

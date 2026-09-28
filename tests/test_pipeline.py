@@ -6,6 +6,9 @@ import pytest
 
 import comments
 import main
+import pipeline
+import recollect
+import runs
 from adaptive_retry import RetryQueue
 from checkpoint_manager import CheckpointManager
 from helpers import make_comment, make_danmaku, make_video
@@ -13,7 +16,7 @@ from helpers import make_comment, make_danmaku, make_video
 
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
-    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *_: None)
 
 
 def test_failed_comments_are_retried_and_written_back(tmp_path, monkeypatch, capsys):
@@ -27,21 +30,21 @@ def test_failed_comments_are_retried_and_written_back(tmp_path, monkeypatch, cap
         return [make_comment(1, "太好看了")], 1, {"mode2_count": 1, "mode3_count": 0,
                                                "overlap_count": 0}
 
-    monkeypatch.setattr(main, "fetch_comments_maximized", fake_comments)
-    monkeypatch.setattr(main, "fetch_video_danmaku",
+    monkeypatch.setattr(pipeline, "fetch_comments_maximized", fake_comments)
+    monkeypatch.setattr(pipeline, "fetch_video_danmaku",
                         lambda cid, duration, limiter=None: [make_danmaku(i * 1000) for i in range(30)])
 
     checkpoint = CheckpointManager(str(tmp_path), series_number=1, total_videos=1)
     retry_queue = RetryQueue()
-    job = main.process_video(make_video(), str(tmp_path), no_content=True, checkpoint=checkpoint,
+    job = pipeline.process_video(make_video(), str(tmp_path), no_content=True, checkpoint=checkpoint,
                              retry_queue=retry_queue, comment_max_pages=7)
 
     assert calls["pages"] == 7
     assert checkpoint._state["videos"]["123"]["state"] == "failed"
     assert retry_queue.get_pending_count() == 1
 
-    all_stats = [main._summary_entry(job)]
-    main._retry_failed(retry_queue, all_stats, checkpoint)
+    all_stats = [pipeline.summary_entry(job)]
+    pipeline.retry_failed(retry_queue, all_stats, checkpoint)
 
     assert checkpoint._state["videos"]["123"]["state"] == "completed"
     assert all_stats[0]["stats"]["comments"]["total"] == 1
@@ -56,12 +59,12 @@ def test_multi_part_danmaku_is_joined_on_one_timeline(monkeypatch, tmp_path):
         fetched.append((cid, duration))
         return [make_danmaku(1000)]
 
-    monkeypatch.setattr(main, "fetch_video_danmaku", fake_danmaku)
-    job = main.VideoJob(video=make_video(cid=11, duration=300), output_dir=str(tmp_path),
+    monkeypatch.setattr(pipeline, "fetch_video_danmaku", fake_danmaku)
+    job = pipeline.VideoJob(video=make_video(cid=11, duration=300), output_dir=str(tmp_path),
                         dir_name="x")
     job.video_specs = {"pages": [{"cid": 11, "duration": 100}, {"cid": 22, "duration": 200}]}
 
-    main._collect_danmaku(job)
+    pipeline._collect_danmaku(job)
 
     assert fetched == [(11, 100), (22, 200)]
     assert [d.progress for d in job.danmaku] == [1000, 101_000]
@@ -74,12 +77,12 @@ def test_peak_frames_use_the_part_they_belong_to(monkeypatch, tmp_path):
         captured.append((cid, time_offset_ms, [p["time"] for p in peaks]))
         return [{"timestamp_info": p, "frame_path": f"{p['time']}.jpg"} for p in peaks]
 
-    monkeypatch.setattr(main, "capture_frames", fake_capture)
-    job = main.VideoJob(video=make_video(cid=11), output_dir=str(tmp_path), dir_name="x")
+    monkeypatch.setattr(pipeline, "capture_frames", fake_capture)
+    job = pipeline.VideoJob(video=make_video(cid=11), output_dir=str(tmp_path), dir_name="x")
     job.video_specs = {"pages": [{"cid": 11, "duration": 100}, {"cid": 22, "duration": 200}]}
     peaks = [{"time": "2:30"}, {"time": "0:10"}, {"time": "1:40"}]  # 150s / 10s / 100s
 
-    results = main._capture_peak_frames(job, peaks)
+    results = pipeline._capture_peak_frames(job, peaks)
 
     assert sorted(captured) == [(11, 0, ["0:10"]), (22, 100_000, ["2:30", "1:40"])]
     assert [r["timestamp_info"]["time"] for r in results] == ["2:30", "0:10", "1:40"]
@@ -203,7 +206,7 @@ def test_comments_only_resumes_and_skips_finished_videos(tmp_path, monkeypatch):
                             "output_dir": f"{aid}_视频{aid}"}
     (run / "resume_state.json").write_text(
         json.dumps({"series_number": 390, "total_videos": 2, "videos": videos}), encoding="utf-8")
-    (run / main.RECOLLECT_STATE_FILE).write_text(
+    (run / runs.RECOLLECT_STATE_FILE).write_text(
         json.dumps({"1": {"strategy": "full", "count": 500}}), encoding="utf-8")
 
     fetched = []
@@ -213,12 +216,12 @@ def test_comments_only_resumes_and_skips_finished_videos(tmp_path, monkeypatch):
         return [make_comment(i) for i in range(30)], 50, {"strategy": "full", "collected": 30,
                                                           "reported_total": 50, "sub_replies": 0}
 
-    monkeypatch.setattr(main, "fetch_comments_full", fake_full)
+    monkeypatch.setattr(pipeline, "fetch_comments_full", fake_full)
 
-    main._recollect_comments_only(str(tmp_path), full=True)
+    recollect.recollect_comments(str(tmp_path), full=True)
 
     assert fetched == [2]
-    state = json.loads((run / main.RECOLLECT_STATE_FILE).read_text(encoding="utf-8"))
+    state = json.loads((run / runs.RECOLLECT_STATE_FILE).read_text(encoding="utf-8"))
     assert state["2"]["strategy"] == "full" and state["2"]["count"] == 30
     stats = json.loads((run / "2_视频2" / "stats.json").read_text(encoding="utf-8"))
     assert stats["comments"]["total"] == 30
@@ -278,9 +281,9 @@ def test_comments_only_pauses_after_consecutive_failures(tmp_path, monkeypatch):
         attempts.append(aid)
         raise comments.CommentsIncomplete("网络连续出错", 0)
 
-    monkeypatch.setattr(main, "fetch_comments_full", failing_full)
+    monkeypatch.setattr(pipeline, "fetch_comments_full", failing_full)
 
-    main._recollect_comments_only(str(tmp_path), full=True)
+    recollect.recollect_comments(str(tmp_path), full=True)
 
     assert attempts == [1, 2, 3]
 
@@ -350,9 +353,57 @@ def test_full_collection_refuses_to_start_without_login(monkeypatch):
     import sys
     started = []
     monkeypatch.setattr(main, "check_login", lambda: False)
-    monkeypatch.setattr(main, "_recollect_comments_only", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(main, "recollect_comments", lambda *a, **k: started.append(a))
     monkeypatch.setattr(sys, "argv", ["main.py", "--comments-only", "--full-comments"])
 
     main.main()
 
     assert started == []
+
+
+def test_run_series_end_to_end(tmp_path, monkeypatch, capsys):
+    """整期采集：3 个视频，其中 1 个评论第一次失败、末尾重试成功；输出清单、汇总报告和周报"""
+    videos = [make_video(aid, title=f"视频{aid}", cid=aid * 10, duration=120) for aid in (1, 2, 3)]
+    monkeypatch.setattr(pipeline, "get_series_info",
+                        lambda n: {"number": n, "name": f"第{n}期", "video_count": 3})
+    monkeypatch.setattr(pipeline, "fetch_weekly_videos", lambda n: list(videos))
+    attempts = {}
+
+    def fake_comments(aid, max_pages_per_mode=100, limiter=None):
+        attempts[aid] = attempts.get(aid, 0) + 1
+        if aid == 2 and attempts[aid] == 1:
+            raise RuntimeError("412 限流")
+        return ([make_comment(aid * 100 + i, "太好看了") for i in range(5)], 5,
+                {"mode2_count": 5, "mode3_count": 0, "overlap_count": 0})
+
+    monkeypatch.setattr(pipeline, "fetch_comments_maximized", fake_comments)
+    monkeypatch.setattr(pipeline, "fetch_video_danmaku",
+                        lambda cid, duration, limiter=None: [make_danmaku(i * 2000) for i in range(40)])
+
+    pipeline.run_series(pipeline.RunOptions(
+        output=str(tmp_path), series=77, run_name="20260101_000000",
+        no_content=True, use_adaptive=False))
+
+    run = tmp_path / "20260101_000000"
+    state = json.loads((run / "resume_state.json").read_text(encoding="utf-8"))
+    assert state["series_number"] == 77
+    assert {v["state"] for v in state["videos"].values()} == {"completed"}
+    assert attempts == {1: 1, 2: 2, 3: 1}
+    assert (run / "report.md").read_text(encoding="utf-8").startswith("# 每周必看 第77期")
+    assert (run / "weekly_report.html").is_file()
+    out = capsys.readouterr().out
+    assert "重试失败项" in out and "周报网页" in out
+
+
+def test_run_series_refuses_run_dir_of_another_issue(tmp_path, monkeypatch, capsys):
+    run = tmp_path / "20260101_000000"
+    run.mkdir()
+    (run / "resume_state.json").write_text(json.dumps({"series_number": 76, "videos": {}}), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "get_series_info", lambda n: {})
+    monkeypatch.setattr(pipeline, "fetch_weekly_videos", lambda n: [make_video(1)])
+    processed = []
+    monkeypatch.setattr(pipeline, "process_video", lambda *a, **k: processed.append(a))
+
+    pipeline.run_series(pipeline.RunOptions(output=str(tmp_path), series=77, run_name="20260101_000000"))
+
+    assert processed == [] and "不一致" in capsys.readouterr().out

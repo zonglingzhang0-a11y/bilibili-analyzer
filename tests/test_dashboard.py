@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import dashboard
-from main import RECOLLECT_STATE_FILE, RUN_START_MARKER
+from runs import RECOLLECT_STATE_FILE, RUN_START_MARKER
 
 PIPELINE_LOG = f"""{RUN_START_MARKER} 2026-01-01 00:00:00  参数: -s 389 --full-comments
 [1/3] (总进度 0/3)
