@@ -11,6 +11,16 @@ from functools import lru_cache
 import jieba
 
 from comments import Comment
+
+# B站常见专有名词：jieba 默认词典会把它们切断（如「洛天依」→「洛天/依」），影响词频和梗雷达
+BILIBILI_WORDS = (
+    "洛天依", "乐正绫", "言和", "星尘", "初音未来", "镜音双子",
+    "三角洲行动", "崩坏星穹铁道", "星穹铁道", "绝区零", "鸣潮", "明日方舟", "终末地",
+    "黑神话", "王者荣耀", "英雄联盟", "第五人格", "蛋仔派对",
+    "一键三连", "前方高能", "名场面", "下次一定", "弹幕护体", "野生字幕君",
+)
+for _word in BILIBILI_WORDS:
+    jieba.add_word(_word)
 from danmaku import Danmaku
 
 

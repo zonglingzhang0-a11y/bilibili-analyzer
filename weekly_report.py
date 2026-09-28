@@ -464,20 +464,23 @@ def analyze_run(run_dir: str, embed_media: bool = True) -> dict:
 
 
 def find_previous_run(run_dir: str) -> str | None:
-    """在同一输出目录下寻找上一期（期号减一）的运行目录，优先完成视频最多的"""
+    """在同一输出目录下寻找用于对比的更早一期：优先期号紧邻的，没有时取最近的更早一期；
+    同一期有多个运行目录时取完成视频最多的"""
     series = (_load_json(os.path.join(run_dir, "resume_state.json"), {}) or {}).get("series_number")
     if not series:
         return None
     root = os.path.dirname(os.path.normpath(run_dir))
-    best, best_done = None, -1
+    best, best_key = None, None
     for entry in os.listdir(root):
         candidate = os.path.join(root, entry)
         state = _load_json(os.path.join(candidate, "resume_state.json"), None)
-        if not state or state.get("series_number") != series - 1:
+        number = (state or {}).get("series_number")
+        if not number or number >= series:
             continue
         done = sum(1 for v in state.get("videos", {}).values() if v.get("state") == "completed")
-        if done > best_done:
-            best, best_done = candidate, done
+        key = (number, done)
+        if best_key is None or key > best_key:
+            best, best_key = candidate, key
     return best
 
 

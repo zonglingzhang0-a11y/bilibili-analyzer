@@ -86,3 +86,10 @@ def test_video_link_for_multi_part_video():
     pages = [{"duration": 100}, {"duration": 200}]
     assert weekly_report._video_link("BVx", pages, 150) == "https://www.bilibili.com/video/BVx?p=2&t=50"
     assert weekly_report._video_link("", pages, 10) is None
+
+
+def test_find_previous_run_falls_back_to_nearest_earlier_issue(tmp_path):
+    older = _make_run(tmp_path, "20260801_000000", 98, "awsl")
+    _make_run(tmp_path, "20260915_000000", 102, "xswl")
+    current = _make_run(tmp_path, "20260908_000000", 101, "xswl")
+    assert weekly_report.find_previous_run(str(current)) == str(older)

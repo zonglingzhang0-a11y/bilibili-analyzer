@@ -43,7 +43,8 @@ main { max-width: 1120px; margin: 0 auto; padding: 0 20px 80px; }
 .hero .sub { color: var(--ink-2); font-size: 14px; }
 nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--page) 88%, transparent);
   backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); margin: 20px -20px 0; padding: 0 20px; }
-nav .links { max-width: 1120px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto; }
+nav .links { max-width: 1120px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto;  scrollbar-width: none; }
+nav .links::-webkit-scrollbar { display: none; }
 nav a { color: var(--ink-2); padding: 12px 10px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; }
 nav a:hover { color: var(--ink); text-decoration: none; border-bottom-color: var(--axis); }
 
@@ -53,7 +54,7 @@ section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-wi
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
 
 /* 指标 */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 24px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; margin-top: 24px; }
 .kpi { padding: 16px 18px; }
 .kpi .label { color: var(--muted); font-size: 12px; }
 .kpi .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
@@ -68,7 +69,7 @@ section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-wi
 .legend i.line { height: 2px; width: 14px; border-radius: 1px; vertical-align: 3px; }
 
 /* 看点 */
-.insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 14px; }
 .insight { padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
 .insight .tag { font-size: 12px; color: var(--s1); font-weight: 600; letter-spacing: .02em; }
 .insight .head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
@@ -87,8 +88,8 @@ blockquote .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
 .controls label { color: var(--ink-2); font-size: 13px; }
 select, input[type=search] { font: inherit; font-size: 14px; padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
-input[type=search] { min-width: 220px; }
-.wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+input[type=search] { min-width: min(220px, 100%); }
+.wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); gap: 14px; }
 .vcard { overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: transform .12s ease, border-color .12s; text-align: left; font: inherit; color: inherit; padding: 0; }
 .vcard:hover, .vcard:focus-visible { transform: translateY(-2px); border-color: var(--s1); outline: none; }
 .vcard .cover { aspect-ratio: 16/10; background: var(--grid) center/cover no-repeat; position: relative; }
@@ -113,7 +114,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .bar-row .track { height: 8px; background: var(--grid); border-radius: 4px; margin-top: 5px; }
 .bar-row .fill { height: 100%; background: var(--s1); border-radius: 4px; }
 .bar-row .v { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
-.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; }
 .pad { padding: 18px 20px; }
 .pad h3 { margin: 0 0 12px; font-size: 15px; }
 .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
@@ -149,7 +150,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .block { margin-top: 26px; }
 .block h3 { font-size: 16px; margin: 0 0 4px; }
 .block .lede { color: var(--ink-2); font-size: 13px; margin: 0 0 10px; }
-.peaks { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.peaks { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); gap: 12px; }
 .peak { padding: 10px; }
 .peak img { width: 100%; border-radius: 6px; display: block; margin-bottom: 8px; }
 .peak .when { font-weight: 600; }
