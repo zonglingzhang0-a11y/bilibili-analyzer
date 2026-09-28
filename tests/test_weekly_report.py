@@ -88,6 +88,21 @@ def test_video_link_for_multi_part_video():
     assert weekly_report._video_link("", pages, 10) is None
 
 
+def test_refresh_later_reports_after_filling_a_gap(tmp_path, monkeypatch):
+    monkeypatch.setattr(weekly_report, "MIN_COMMENTS", 10)
+    _make_run(tmp_path, "20260901_000000", 100, "awsl")
+    later = _make_run(tmp_path, "20260915_000000", 102, "xswl")
+    weekly_report.generate_weekly_report(str(later))  # 此时与第 100 期对比
+    middle = _make_run(tmp_path, "20260908_000000", 101, "xswl")
+
+    refreshed = weekly_report.refresh_later_reports(str(middle))
+
+    assert [r["series"] for r in refreshed] == [102]
+    html = open(refreshed[0]["path"], encoding="utf-8").read()
+    payload = html.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert json.loads(payload)["previous"]["series"]["number"] == 101
+
+
 def test_find_previous_run_falls_back_to_nearest_earlier_issue(tmp_path):
     older = _make_run(tmp_path, "20260801_000000", 98, "awsl")
     _make_run(tmp_path, "20260915_000000", 102, "xswl")

@@ -4,7 +4,6 @@
 import time
 import random
 from dataclasses import dataclass, field
-from typing import Callable
 
 
 class AdaptiveRateLimiter:

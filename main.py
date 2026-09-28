@@ -22,7 +22,7 @@ from ranking import (
     VideoInfo, fetch_weekly_videos, fetch_weekly_series, get_latest_series_number, get_series_info,
 )
 from comments import (
-    CommentsIncomplete, check_login, fetch_comments, fetch_comments_full, fetch_comments_maximized,
+    check_login, fetch_comments, fetch_comments_full, fetch_comments_maximized,
 )
 from danmaku import fetch_video_danmaku, danmaku_from_dict
 from stats import build_statistics, print_report, save_results
@@ -32,7 +32,7 @@ from content_analyzer import (
 )
 from report_writer import generate_video_report, write_summary
 from rebuild import PRESERVED_KEYS, rebuild_all
-from weekly_report import generate_weekly_report
+from weekly_report import generate_weekly_report, refresh_later_reports
 from checkpoint_manager import CheckpointManager
 from adaptive_retry import (
     AdaptiveRateLimiter, RetryQueue,
@@ -730,10 +730,13 @@ def _recollect_comments_only(output_root: str, maximize: bool = True,
 
 
 def _write_weekly_report(run_dir: str):
-    """生成周报网页（自动与同一输出目录中的上一期对比）；失败不影响采集结果"""
+    """生成周报网页（自动与同一输出目录中的上一期对比），并刷新改为与本期对比的后续各期；
+    失败不影响采集结果"""
     try:
         path = generate_weekly_report(run_dir)
         print(f"📊 周报网页: {path}")
+        for later in refresh_later_reports(run_dir):
+            print(f"📊 已更新第 {later['series']} 期周报（改为与本期对比）: {later['path']}")
     except Exception as e:
         print(f"⚠️ 周报网页生成失败: {e}")
 

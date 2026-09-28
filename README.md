@@ -104,7 +104,10 @@ python dashboard.py bilibili_output/20260911_180000          # 另开一个终�
 ```bash
 python weekly_report.py bilibili_output/20260913_155601                     # 自动与上一期对比
 python weekly_report.py bilibili_output/20260913_155601 --compare bilibili_output/20260911_011803
+python weekly_report.py --all                                              # 重新生成所有期的周报
 ```
+
+补采了中间某一期后，更晚一期的周报会自动改为与它对比。
 
 页面包括：
 

@@ -538,15 +538,58 @@ def generate_weekly_report(run_dir: str, compare_dir: str | None = None,
     return output_path
 
 
+def _run_dirs(root: str) -> list[str]:
+    """输出目录下所有带断点续传清单（有期号）的运行目录"""
+    if not os.path.isdir(root):
+        return []
+    runs = []
+    for entry in sorted(os.listdir(root)):
+        path = os.path.join(root, entry)
+        if (_load_json(os.path.join(path, "resume_state.json"), None) or {}).get("series_number"):
+            runs.append(path)
+    return runs
+
+
+def refresh_later_reports(run_dir: str) -> list[dict]:
+    """补采了中间某一期后，更晚的各期应当改为与它对比：重新生成这些期的周报
+
+    Returns:
+        [{"series": 期号, "path": 周报路径}]
+    """
+    root = os.path.dirname(os.path.normpath(run_dir))
+    target = os.path.normcase(os.path.abspath(run_dir))
+    refreshed = []
+    for other in _run_dirs(root):
+        previous = find_previous_run(other)
+        if previous and os.path.normcase(os.path.abspath(previous)) == target \
+                and os.path.exists(os.path.join(other, OUTPUT_NAME)):
+            series = _load_json(os.path.join(other, "resume_state.json"), {}).get("series_number")
+            refreshed.append({"series": series, "path": generate_weekly_report(other, previous)})
+    return refreshed
+
+
 def main():
     if sys.stdout.encoding != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="生成每周必看周报网页")
-    parser.add_argument("run_dir", help="运行目录，如 bilibili_output/20260913_155601")
+    parser.add_argument("run_dir", nargs="?", help="运行目录，如 bilibili_output/20260913_155601")
     parser.add_argument("--compare", default=None,
                         help="用于对比的上一期运行目录（默认自动寻找）")
     parser.add_argument("-o", "--output", default=None, help="输出文件（默认 <运行目录>/weekly_report.html）")
+    parser.add_argument("--all", nargs="?", const="bilibili_output", default=None, metavar="OUTPUT_ROOT",
+                        help="重新生成输出目录（默认 bilibili_output）下所有期的周报")
     args = parser.parse_args()
+    if args.all is not None:
+        runs = _run_dirs(args.all)
+        for run in runs:
+            compare = find_previous_run(run)
+            path = generate_weekly_report(run, compare)
+            print(f"📄 {os.path.basename(run)}"
+                  + (f"（对比 {os.path.basename(compare)}）" if compare else "（无对比）") + f": {path}")
+        print(f"共重新生成 {len(runs)} 份周报")
+        return
+    if not args.run_dir:
+        parser.error("请指定运行目录，或使用 --all")
     compare = args.compare or find_previous_run(args.run_dir)
     print(f"生成周报: {args.run_dir}" + (f"（对比 {os.path.basename(compare)}）" if compare else "（未找到上一期，不做对比）"))
     path = generate_weekly_report(args.run_dir, compare, args.output)
