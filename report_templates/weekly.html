@@ -199,6 +199,9 @@ tbody tr:last-child td { border-bottom: 0; }
     <h2>梗雷达</h2>
     <p class="lede" id="radar-lede"></p>
     <div id="radar"></div>
+    <div class="card pad" style="margin-top:14px"><h3>表情榜</h3>
+      <p class="lede" id="emoji-lede" style="margin:0 0 12px"></p>
+      <div class="bars" id="emojis"></div></div>
   </section>
 
   <section id="overlap-sec">
@@ -463,7 +466,7 @@ function renderRadar() {
     return;
   }
   const prevNo = D.previous.series && D.previous.series.number;
-  $("radar-lede").textContent = `本期评论和弹幕里，在至少 3 个视频中出现、而且比第 ${prevNo} 期明显变多的词。只出现在单个视频里的通常是那个视频的话题词，不算梗。`;
+  $("radar-lede").textContent = `本期评论和弹幕里，在至少 3 个视频中出现、而且比第 ${prevNo} 期明显变多的词——可能是新梗，也可能是新的热门话题（人名、事件）。只出现在单个视频里的通常是那个视频自己的话题词，不计入。`;
   const max = Math.max(...r.rising.map(x => x.now), 1);
   const rising = h("div", { class: "card pad" }, h("h3", {}, "本周升温"),
     h("div", { class: "bars" }, r.rising.map(x => h("div", { class: "bar-row" },
@@ -479,6 +482,26 @@ function renderRadar() {
       h("tbody", {}, r.fading.map(x => h("tr", {}, h("td", {}, x.word), h("td", { class: "n" }, fmt(x.before)), h("td", { class: "n" }, fmt(x.now)))))))
       : h("div", { class: "note" }, "没有明显降温的词"));
   $("radar").replaceChildren(h("div", { class: "split" }, rising, fading));
+}
+
+/* ── 表情榜 ── */
+function renderEmojis() {
+  const e = D.emojis;
+  if (!e || !e.items.length) { $("emoji-lede").textContent = "本期评论里没有表情。"; return; }
+  $("emoji-lede").textContent = "本期评论里用得最多的 B站 表情（每 100 条一级评论出现的次数）。" + (e.compared ? "蓝色标签是相比上一期的排名变化。" : "");
+  const max = Math.max(...e.items.map(x => x.count));
+  const moveText = x => {
+    if (!e.compared) return "";
+    if (!x.before_rank) return "新上榜";
+    const d = x.before_rank - x.rank;
+    return d > 0 ? `↑${d}` : d < 0 ? `↓${-d}` : "持平";
+  };
+  $("emojis").replaceChildren(...e.items.map(x => h("div", { class: "bar-row" },
+    h("div", { class: "label" }, h("b", {}, `[${x.name}]`),
+      moveText(x) ? h("span", { class: "badge" }, moveText(x)) : null,
+      h("small", {}, `  ${fmt(x.count)} 次 · 出现在 ${x.videos} 个视频`),
+      h("div", { class: "track" }, h("div", { class: "fill", style: `width:${x.count / max * 100}%` }))),
+    h("div", { class: "v" }, `${x.per_100} 次/百条`))));
 }
 
 /* ── 观众重合 ── */
@@ -552,7 +575,7 @@ function renderCompare() {
 function renderMethod() {
   const items = [
     "评论为一级评论全量采集（按时间排序翻到最后一页）；接口给出的评论总数包含楼中楼回复，楼中楼只计数，不参与内容分析。",
-    "情感分析基于词典和否定词规则，适合在视频之间比较倾向，不适合逐条精确判断；大量评论没有明显情感词，会被判为中性。",
+    "情感分析基于词典和否定词规则，并计入含义明确的表情（如 [星星眼] 算正面、[辣眼睛] 算负面；[笑哭]、[doge] 这类褒贬不定的不计）；适合在视频之间比较倾向，不适合逐条精确判断，没有明显情感词的评论判为中性。",
     `好评率、争议指数、评论半衰期、深夜评论等排行只统计一级评论不少于 ${D.min_comments} 条的视频，避免小样本的比例失真。`,
     "争议指数 = 负面评论占比（%）×（1 + 平均每条一级评论的楼中楼回复数）：差评多、而且吵得凶的视频数值高。",
     "「观众在说什么」取每个视频相对其他视频最有区分度的词（TF-IDF），并附一条包含该词的高赞评论。",
@@ -588,6 +611,8 @@ function openDetail(aid) {
           h("span", {}, h("i", { style: "background:var(--pos)" }), `正面 ${pct(v.sentiment.positive / total)}`),
           h("span", {}, h("i", { style: "background:var(--neu)" }), `中性 ${pct(v.sentiment.neutral / total)}`),
           h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(v.sentiment.negative / total)}`)),
+        v.top_emojis && v.top_emojis.length ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:6px" },
+          "最常用表情：", v.top_emojis.map(x => `[${x.name}] ${fmt(x.count)}`).join(" · ")) : null,
         v.link ? h("div", { style: "margin-top:10px" }, h("a", { href: v.link, target: "_blank", rel: "noopener" }, "在 B站 打开 ↗")) : null)),
     h("div", { class: "block" }, h("h3", {}, "弹幕热度"),
       h("p", { class: "lede" }, "每 10 秒的弹幕数量。把鼠标移到曲线上，可以看到那一刻刷得最多的弹幕；圆点是弹幕高潮。"),
@@ -636,7 +661,7 @@ function closeDetail() {
 $("drawer").addEventListener("click", e => { if (e.target.closest("[data-close]")) closeDetail(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
 
-renderHeader(); renderInsights(); renderWall(); renderRadar(); renderOverlap(); renderLife(); renderCompare(); renderMethod();
+renderHeader(); renderInsights(); renderWall(); renderRadar(); renderEmojis(); renderOverlap(); renderLife(); renderCompare(); renderMethod();
 </script>
 </body>
 </html>

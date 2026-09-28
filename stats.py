@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime
 from functools import lru_cache
@@ -106,6 +107,26 @@ _SENTIMENT_PHRASES = sorted(
 )
 
 
+# B站评论里的表情代码，如 [doge]、[笑哭]、[明日方舟_打call]；约三成评论带表情
+EMOJI_RE = re.compile(r"\[([^\[\]\s]{1,24})\]")
+# 含义明确的表情才计入情感。[笑哭] [doge] [大哭] [微笑] [吃瓜] 等在不同语境下褒贬相反，不计
+POSITIVE_EMOJI = {
+    "星星眼", "打call", "给心心", "喜极而泣", "喜欢", "支持", "妙啊", "鼓掌", "惊喜", "点赞",
+    "爱心", "比心", "拥抱", "抱拳", "胜利", "大笑", "哦呼", "三连", "太好了", "赞",
+}
+NEGATIVE_EMOJI = {"生气", "辣眼睛", "无语", "抓狂", "嫌弃", "吐", "鄙视", "怒"}
+
+
+def emoji_name(code: str) -> str:
+    """表情包前缀去掉后的名字：「明日方舟_打call」→「打call」"""
+    return code.rsplit("_", 1)[-1]
+
+
+def extract_emojis(text: str) -> list[str]:
+    """文本里的表情代码（不含方括号）"""
+    return EMOJI_RE.findall(text or "")
+
+
 @lru_cache(maxsize=200_000)
 def _cut(text: str) -> tuple[str, ...]:
     """jieba 分词（带缓存：同一批弹幕会在词频、情感、主题差异中被反复分词，且重复文本很多）"""
@@ -113,9 +134,11 @@ def _cut(text: str) -> tuple[str, ...]:
 
 
 def segment_text(text: str) -> list[str]:
-    """中文分词 + 去停用词"""
+    """中文分词 + 去停用词。表情代码不算词，英文统一小写（Mujica 与 mujica 合并）"""
+    text = EMOJI_RE.sub(" ", text or "")
     words = (w.strip() for w in _cut(text))
-    return [w for w in words if len(w) >= 2 and w not in STOP_WORDS]
+    return [w.lower() if w.isascii() else w for w in words
+            if len(w) >= 2 and w not in STOP_WORDS]
 
 
 def _word_polarity(word: str) -> int:
@@ -162,8 +185,17 @@ def analyze_sentiment(text: str) -> str:
     - 三字以上短语整体匹配（如「永远的神」「粗制滥造」）
     - 其余按 jieba 分词匹配，保留单字情感词（好/棒/烂/坑…）
     - 情感词前 3 个词内出现否定词（可跳过程度副词）时翻转极性，如「不好看」「不是很喜欢」
+    - 含义明确的表情计入情感（[星星眼] 正面、[辣眼睛] 负面），表情代码本身不再参与分词
     """
     score_pos = score_neg = 0
+
+    for code in extract_emojis(text):
+        name = emoji_name(code)
+        if name in POSITIVE_EMOJI:
+            score_pos += 1
+        elif name in NEGATIVE_EMOJI:
+            score_neg += 1
+    text = EMOJI_RE.sub("，", text)
 
     for phrase, polarity in _SENTIMENT_PHRASES:
         if phrase in text:

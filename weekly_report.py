@@ -21,7 +21,7 @@ from datetime import datetime
 
 from rebuild import _load_json, _series_info, _video_dirs
 from report_writer import _resolve_asset
-from stats import analyze_sentiment, segment_text
+from stats import analyze_sentiment, extract_emojis, segment_text
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "report_templates", "weekly.html")
@@ -172,9 +172,10 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
             "link": _video_link(bvid, pages, second),
         })
 
-    words = Counter()
+    words, emojis = Counter(), Counter()
     for comment in comments:
         words.update(segment_text(comment.get("content", "")))
+        emojis.update(extract_emojis(comment.get("content", "")))
     danmaku_words = Counter()
     for item in danmaku:
         danmaku_words.update(segment_text(item.get("content", "")))
@@ -216,7 +217,9 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
         "best_positive": _best_comment(comments, labels, "positive", set(ranked[:3])),
         "best_negative": _best_comment(comments, labels, "negative", set(ranked[:3])),
         "keywords": [],
+        "top_emojis": [{"name": name, "count": count} for name, count in emojis.most_common(5)],
         # 以下供全期汇总使用，不写入网页
+        "_emojis": emojis,
         "_words": words,
         "_danmaku_words": danmaku_words,
         "_mids": {c["mid"] for c in comments if c.get("mid")},
@@ -315,6 +318,26 @@ def _meme_radar(current: list[dict], previous: list[dict] | None) -> dict | None
         "fading": [{"word": w, "before": c, "now": n, "drop": round(d, 1)}
                    for _, w, c, n, d in fading[:10]],
     }
+
+
+def _emoji_board(current: list[dict], previous: list[dict] | None, top: int = 12) -> dict:
+    """表情榜：本期评论里用得最多的表情，以及相比上一期的排名变化"""
+    now = Counter()
+    for video in current:
+        now.update(video["_emojis"])
+    comments = sum(v["comments"] for v in current) or 1
+    before_rank = {}
+    if previous:
+        before = Counter()
+        for video in previous:
+            before.update(video["_emojis"])
+        before_rank = {name: i for i, (name, _) in enumerate(before.most_common(), 1)}
+    items = []
+    for rank, (name, count) in enumerate(now.most_common(top), 1):
+        spread = sum(1 for v in current if v["_emojis"].get(name))
+        items.append({"name": name, "count": count, "per_100": round(count / comments * 100, 1),
+                      "videos": spread, "rank": rank, "before_rank": before_rank.get(name)})
+    return {"items": items, "compared": bool(previous)}
 
 
 def _audience_overlap(videos: list[dict]) -> dict:
@@ -514,6 +537,7 @@ def build_report_data(run_dir: str, compare_dir: str | None = None) -> dict:
         "insights": _insights(current["videos"], current["summary"], radar, overlap),
         "videos": [_public(v) for v in current["videos"]],
         "radar": radar,
+        "emojis": _emoji_board(current["videos"], previous["videos"] if previous else None),
         "overlap": overlap,
         "regulars": regulars,
         "min_comments": MIN_COMMENTS,

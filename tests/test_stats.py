@@ -47,3 +47,20 @@ def test_up_reply_count_uses_up_action_and_preview_replies():
     result = stats.build_statistics(comments, [], owner_mid=42)
     assert result["comments"]["up_reply_count"] == 4
     assert result["owner_mid"] == 42
+
+
+def test_segment_text_ignores_emoji_codes_and_lowercases_latin():
+    words = stats.segment_text("Mujica 太好听了[星星眼][doge_金箍] mujica")
+    assert words.count("mujica") == 2
+    assert not any(w in words for w in ("星星眼", "星星", "doge", "金箍"))
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("[星星眼][打call]", "positive"),
+    ("[明日方舟_打call]", "positive"),     # 表情包前缀
+    ("这剪辑[辣眼睛]", "negative"),
+    ("[笑哭][doge]", "neutral"),           # 褒贬不定的表情不计
+    ("不喜欢[给心心]", "neutral"),          # 否定词和正面表情相互抵消
+])
+def test_sentiment_counts_unambiguous_emojis(text, expected):
+    assert stats.analyze_sentiment(text) == expected
