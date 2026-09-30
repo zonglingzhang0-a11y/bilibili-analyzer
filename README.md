@@ -109,6 +109,8 @@ python weekly_report.py --all                                              # 重
 
 补采了中间某一期后，更晚一期的周报会自动改为与它对比。
 
+每次生成周报时还会刷新输出目录下的**总览页** `bilibili_output/index.html`：每期一张卡片（关键数字、看点、热梗、常用表情，点击进入该期周报），以及跨期趋势图、梗的时间线和多期上榜的 UP 主。还在采集中的期会标注出来，不计入趋势。
+
 页面包括：
 
 - **本期看点**：最受好评、争议最大、弹幕名场面、热度最持久、深夜党最多、本周热梗、观众重合最高，每条附证据
@@ -178,7 +180,7 @@ python -m pytest
 | `report_writer.py` | 图表与 Markdown 报告 |
 | `rebuild.py` | 离线重建 |
 | `dashboard.py` | 采集进度看板 |
-| `weekly_report.py` / `report_templates/` | 周报网页 |
+| `weekly_report.py` / `report_templates/` | 周报网页与总览页（`common.css` / `common.js` 为两者共用的样式和图表） |
 | `checkpoint_manager.py` / `adaptive_retry.py` | 断点续传清单、自适应限流与重试队列 |
 | `wbi.py` / `bili_auth.py` / `bili_http.py` | WBI 签名、登录凭证、公共请求配置 |
 

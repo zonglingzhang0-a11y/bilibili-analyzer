@@ -23,9 +23,10 @@ from rebuild import _load_json, _series_info, _video_dirs
 from report_writer import _resolve_asset
 from stats import analyze_sentiment, extract_emojis, segment_text
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "report_templates", "weekly.html")
+TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_templates")
 OUTPUT_NAME = "weekly_report.html"
+DIGEST_NAME = "weekly_summary.json"   # 每期的摘要，供总览页使用
+INDEX_NAME = "index.html"             # 输出根目录下的总览页
 
 MIN_COMMENTS = 300          # 参与好评率、争议、寿命等排行的最少一级评论数（样本太少的比例不可靠）
 TIMELINE_HOURS = 168        # 评论走势显示发布后 7 天
@@ -548,22 +549,107 @@ def build_report_data(run_dir: str, compare_dir: str | None = None) -> dict:
     }
 
 
+def _render(template_name: str, title: str, data: dict) -> str:
+    """把数据嵌入模板：公共样式/脚本 + 标题 + JSON 数据（防止数据中的 </script> 截断页面）"""
+    def read(name):
+        with open(os.path.join(TEMPLATE_DIR, name), encoding="utf-8") as f:
+            return f.read()
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    return (read(template_name)
+            .replace("{{COMMON_CSS}}", read("common.css"))
+            .replace("{{COMMON_JS}}", read("common.js"))
+            .replace("{{TITLE}}", title)
+            .replace("{{DATA}}", payload))
+
+
+def _run_completion(run_dir: str) -> tuple[int, int]:
+    """(已完成视频数, 计划视频数)"""
+    state = _load_json(os.path.join(run_dir, "resume_state.json"), {}) or {}
+    videos = state.get("videos", {})
+    done = sum(1 for v in videos.values() if v.get("state") == "completed")
+    return done, state.get("total_videos") or len(videos)
+
+
+def _digest(data: dict, run_dir: str) -> dict:
+    """一期周报的摘要（写入运行目录，供总览页汇总）"""
+    by_aid = {v["aid"]: v for v in data["videos"]}
+    done, planned = _run_completion(run_dir)
+    top_videos = sorted(data["videos"], key=lambda v: -v["view"])[:3]
+    return {
+        "series": data["series"],
+        "run_dir": data["run_dir"],
+        "generated_at": data["generated_at"],
+        "report": f"{data['run_dir']}/{OUTPUT_NAME}",
+        "completed": done, "planned": planned,
+        "summary": {k: v for k, v in data["summary"].items() if k != "hour_share"},
+        "compared_with": (data["previous"] or {}).get("series", {}).get("number"),
+        "insights": [{"tag": item["tag"], "value": item["value"],
+                      "subject": item.get("word") or by_aid.get(item.get("aid"), {}).get("title", "")}
+                     for item in data["insights"]],
+        "memes": [x["word"] for x in (data["radar"] or {}).get("rising", [])[:8]],
+        "emojis": [{"name": x["name"], "count": x["count"]} for x in data["emojis"]["items"][:5]],
+        "top_videos": [{"title": v["title"], "owner": v["owner"], "view": v["view"],
+                        "comments": v["comments"], "cover": v["cover"]} for v in top_videos],
+        "owners": [{"owner": v["owner"], "title": v["title"], "view": v["view"]}
+                   for v in data["videos"] if v["owner"]],
+    }
+
+
 def generate_weekly_report(run_dir: str, compare_dir: str | None = None,
                            output_path: str | None = None) -> str:
-    """生成周报网页，返回文件路径。compare_dir 为 None 时自动寻找上一期"""
+    """生成周报网页，返回文件路径。compare_dir 为 None 时自动寻找上一期。
+    同时写出本期摘要，并刷新输出根目录的总览页"""
     if compare_dir is None:
         compare_dir = find_previous_run(run_dir)
     data = build_report_data(run_dir, compare_dir)
-    with open(TEMPLATE_PATH, encoding="utf-8") as f:
-        template = f.read()
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     series = data["series"]
     title = f"每周必看第 {series['number']} 期周报" if series.get("number") else "每周必看周报"
-    html = template.replace("{{TITLE}}", title).replace("{{DATA}}", payload)
     output_path = output_path or os.path.join(run_dir, OUTPUT_NAME)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(_render("weekly.html", title, data))
+    with open(os.path.join(run_dir, DIGEST_NAME), "w", encoding="utf-8") as f:
+        json.dump(_digest(data, run_dir), f, ensure_ascii=False)
+    try:
+        generate_index(os.path.dirname(os.path.normpath(run_dir)))
+    except Exception as e:
+        print(f"⚠️ 总览页生成失败: {e}")
     return output_path
+
+
+def generate_index(output_root: str) -> str | None:
+    """输出根目录的总览页：汇总各期摘要，跨期趋势、梗的时间线、上榜常客；没有任何摘要时返回 None"""
+    best = {}
+    for run in _run_dirs(output_root):
+        digest = _load_json(os.path.join(run, DIGEST_NAME), None)
+        if not digest or not digest.get("series", {}).get("number"):
+            continue
+        number = digest["series"]["number"]
+        # 同一期有多个运行目录时，用完成视频最多、生成最晚的那个
+        key = (digest.get("completed", 0), digest.get("generated_at", ""))
+        if number not in best or key > best[number][0]:
+            best[number] = (key, digest)
+    if not best:
+        return None
+    issues = [best[n][1] for n in sorted(best)]
+
+    appearances = defaultdict(list)
+    for issue in issues:
+        for item in issue["owners"]:
+            appearances[item["owner"]].append({"series": issue["series"]["number"], "title": item["title"],
+                                               "view": item["view"]})
+    regulars = sorted(
+        ({"owner": owner, "issues": len({a["series"] for a in items}), "videos": items}
+         for owner, items in appearances.items() if len({a["series"] for a in items}) >= 2),
+        key=lambda r: (-r["issues"], -sum(v["view"] for v in r["videos"])))
+
+    for issue in issues:
+        issue.pop("owners", None)
+    data = {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "issues": issues,
+            "regulars": regulars[:30], "min_compare_completion": MIN_COMPARE_COMPLETION}
+    path = os.path.join(output_root, INDEX_NAME)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_render("index.html", "每周必看数据总览", data))
+    return path
 
 
 def _run_dirs(root: str) -> list[str]:
@@ -615,6 +701,9 @@ def main():
             print(f"📄 {os.path.basename(run)}"
                   + (f"（对比 {os.path.basename(compare)}）" if compare else "（无对比）") + f": {path}")
         print(f"共重新生成 {len(runs)} 份周报")
+        index = generate_index(args.all)
+        if index:
+            print(f"📚 总览页: {index}")
         return
     if not args.run_dir:
         parser.error("请指定运行目录，或使用 --all")

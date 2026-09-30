@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+{{COMMON_CSS}}
+/* 每期卡片 */
+.issues { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 14px; }
+.issue { display: flex; flex-direction: column; overflow: hidden; }
+.issue .cover { aspect-ratio: 16/7; background: var(--grid) center/cover no-repeat; position: relative; }
+.issue .cover .no { position: absolute; left: 12px; bottom: 10px; background: rgba(0,0,0,.66); color: #fff;
+  font-weight: 650; font-size: 15px; padding: 2px 10px; border-radius: 8px; }
+.issue .cover .state { position: absolute; right: 12px; top: 10px; background: rgba(0,0,0,.66); color: #fff;
+  font-size: 12px; padding: 1px 8px; border-radius: 6px; }
+.issue .body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
+.issue .dates { color: var(--ink-2); font-size: 13px; }
+.mini { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mini b { display: block; font-size: 17px; font-weight: 650; }
+.mini span { color: var(--muted); font-size: 11px; }
+.hl { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
+.hl dt { color: var(--muted); } .hl dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue .open { margin-top: auto; font-size: 14px; font-weight: 600; }
+/* 趋势小图 */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); gap: 14px; }
+.charts .pad h3 { margin-bottom: 2px; }
+.charts .pad .sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.timeline td:first-child { white-space: nowrap; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div class="kicker" id="kicker"></div>
+    <h1>B站每周必看 · 数据总览</h1>
+    <div class="sub" id="subline"></div>
+    <div class="kpis" id="kpis"></div>
+  </header>
+  <nav><div class="links" id="nav"></div></nav>
+
+  <section id="issues-sec">
+    <h2>每期一览</h2>
+    <p class="lede">每期一张卡片：封面是本期播放最高的视频。点「打开本期周报」查看看点、视频详情、梗雷达等全部内容。</p>
+    <div class="issues" id="issues"></div>
+  </section>
+
+  <section id="trend-sec">
+    <h2>跨期趋势</h2>
+    <p class="lede" id="trend-lede"></p>
+    <div class="charts" id="charts"></div>
+  </section>
+
+  <section id="meme-sec">
+    <h2>梗的时间线</h2>
+    <p class="lede">每期梗雷达里升温最明显的词（与前一期相比），连起来看就是这段时间 B站 评论区的热词变化。</p>
+    <div class="card tw"><table class="timeline" id="timeline"></table></div>
+  </section>
+
+  <section id="regular-sec">
+    <h2>上榜常客</h2>
+    <p class="lede" id="regular-lede"></p>
+    <div class="card tw"><table id="regulars"></table></div>
+  </section>
+
+  <section id="method-sec">
+    <h2>说明</h2>
+    <div class="card pad" style="font-size:14px;color:var(--ink-2)" id="method"></div>
+  </section>
+</main>
+
+<script id="data" type="application/json">{{DATA}}</script>
+<script>
+"use strict";
+{{COMMON_JS}}
+const D = JSON.parse(document.getElementById("data").textContent);
+const complete = i => !i.planned || i.completed >= D.min_compare_completion * i.planned;
+const issues = D.issues;                       // 按期号升序
+const done = issues.filter(complete);
+const label = i => `第 ${i.series.number} 期`;
+const dateRange = i => (i.series.name || "").replace(/^\d{4}第\d+期\s*/, "");
+
+function renderHeader() {
+  const sum = key => issues.reduce((a, i) => a + (i.summary[key] || 0), 0);
+  $("kicker").textContent = `生成于 ${D.generated_at}`;
+  const first = issues[0], last = issues[issues.length - 1];
+  $("subline").textContent = issues.length > 1
+    ? `第 ${first.series.number}～${last.series.number} 期，共 ${issues.length} 期`
+    : `第 ${first.series.number} 期`;
+  const tiles = [["期数", issues.length], ["视频", fmt(sum("videos"))], ["一级评论（全量）", wan(sum("comments"))],
+    ["弹幕", wan(sum("danmaku"))], ["总播放", wan(sum("views"))]];
+  $("kpis").replaceChildren(...tiles.map(([l, v]) => h("div", { class: "card kpi" },
+    h("div", { class: "label" }, l), h("div", { class: "value" }, v))));
+  const links = [["issues-sec", "每期一览"], ["trend-sec", "跨期趋势"], ["meme-sec", "梗的时间线"],
+    ["regular-sec", "上榜常客"], ["method-sec", "说明"]];
+  $("nav").replaceChildren(...links.map(([id, t]) => h("a", { href: "#" + id }, t)));
+}
+
+function renderIssues() {
+  const find = (i, tag) => (i.insights || []).find(x => x.tag === tag);
+  $("issues").replaceChildren(...[...issues].reverse().map(i => {
+    const s = i.summary, top = (i.top_videos || [])[0];
+    const pos = s.positive_rate, neg = s.negative_rate;
+    const rows = [["最受好评", find(i, "最受好评")], ["争议最大", find(i, "争议最大")],
+      ["弹幕名场面", find(i, "弹幕名场面")], ["本周热梗", find(i, "本周热梗")]].filter(([, x]) => x);
+    return h("article", { class: "card issue" },
+      h("div", { class: "cover", style: top && top.cover ? `background-image:url(${top.cover})` : "" },
+        h("span", { class: "no" }, label(i)),
+        complete(i) ? null : h("span", { class: "state" }, `采集中 ${i.completed}/${i.planned}`)),
+      h("div", { class: "body" },
+        h("div", { class: "dates" }, dateRange(i) + (top ? ` · 最热：${top.title}` : "")),
+        h("div", { class: "mini num" },
+          h("div", {}, h("b", {}, fmt(s.videos)), h("span", {}, "视频")),
+          h("div", {}, h("b", {}, wan(s.comments)), h("span", {}, "一级评论")),
+          h("div", {}, h("b", {}, wan(s.danmaku)), h("span", {}, "弹幕")),
+          h("div", {}, h("b", {}, wan(s.views)), h("span", {}, "播放"))),
+        h("div", {},
+          sentiBar({ positive: pos, neutral: Math.max(0, 1 - pos - neg), negative: neg }),
+          h("div", { class: "legend", style: "margin-top:6px" },
+            h("span", {}, h("i", { style: "background:var(--pos)" }), `正面 ${pct(pos)}`),
+            h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(neg)}`))),
+        rows.length ? h("dl", { class: "hl" }, rows.flatMap(([t, x]) =>
+          [h("dt", {}, t), h("dd", { title: `${x.subject}（${x.value}）` }, `${x.subject}（${x.value}）`)])) : null,
+        i.memes && i.memes.length ? h("div", { class: "chips" }, i.memes.slice(0, 6).map(m => h("span", { class: "chip" }, m))) : null,
+        i.emojis && i.emojis.length ? h("div", { style: "font-size:13px;color:var(--ink-2)" },
+          "常用表情：", i.emojis.slice(0, 3).map(e => `[${e.name}]`).join(" ")) : null,
+        h("a", { class: "open", href: i.report }, "打开本期周报 →")));
+  }));
+}
+
+function renderTrends() {
+  if (done.length < 2) {
+    $("trend-lede").textContent = "至少需要两期完整的数据才能看趋势。";
+    return;
+  }
+  const skipped = issues.length - done.length;
+  $("trend-lede").textContent = `每期的整体指标变化（把鼠标移到图上看具体数值）。` +
+    (skipped ? `还在采集中的 ${skipped} 期不计入，采完后自动补上。` : "");
+  const charts = [
+    ["一级评论（全量）", "comments", wan, "每期所有视频的一级评论合计"],
+    ["总播放", "views", wan, "采集时各视频播放量合计"],
+    ["弹幕", "danmaku", wan, "播放器当前显示的弹幕合计"],
+    ["正面评论占比", "positive_rate", v => pct(v), "情感分析判为正面的一级评论比例"],
+    ["负面评论占比", "negative_rate", v => pct(v), "情感分析判为负面的一级评论比例"],
+    ["弹幕密度中位数", "median_density", v => v.toFixed(0) + " 条/分", "各视频每分钟弹幕数的中位数"],
+    ["评论半衰期中位数", "median_half_life", hours, "一半评论在发布后多少小时内发出，越短说明热度来去越快"],
+    ["凌晨评论占比", "late_night", v => pct(v), "0～6 点发出的评论比例"],
+  ];
+  $("charts").replaceChildren(...charts.map(([title, key, f, sub]) => {
+    const host = h("div", { class: "chart" });
+    const card = h("div", { class: "card pad" }, h("h3", {}, title), h("div", { class: "sub" }, sub), host);
+    requestAnimationFrame(() => {
+      const values = done.map(i => i.summary[key] ?? 0);
+      lineChart(host, {
+        series: [{ name: title, values, color: "var(--s1)" }],
+        xLabel: k => label(done[k]), yFormat: f, height: 170, area: false,
+        markers: values.map((v, k) => ({ i: k, label: k === values.length - 1 ? f(v) : "" })),
+      });
+    });
+    return card;
+  }));
+}
+
+function renderTimeline() {
+  $("timeline").replaceChildren(
+    h("thead", {}, h("tr", {}, h("th", {}, "期"), h("th", {}, "升温最明显的词"))),
+    h("tbody", {}, [...issues].reverse().map(i => h("tr", {},
+      h("td", {}, label(i)),
+      h("td", {}, i.memes && i.memes.length
+        ? h("div", { class: "chips" }, i.memes.map(m => h("span", { class: "chip" }, m)))
+        : h("span", { class: "note", style: "margin:0" },
+            i.compared_with ? "没有明显升温的词" : "没有更早一期可对比"))))));
+}
+
+function renderRegulars() {
+  const r = D.regulars;
+  $("regular-lede").textContent = r.length
+    ? `在 ${issues.length} 期里至少上榜两期的 UP 主，共 ${r.length} 位。`
+    : "目前还没有 UP 主在两期以上上榜。";
+  if (!r.length) return;
+  $("regulars").replaceChildren(
+    h("thead", {}, h("tr", {}, h("th", {}, "UP 主"), h("th", { class: "n" }, "上榜期数"), h("th", {}, "上榜视频"))),
+    h("tbody", {}, r.map(x => h("tr", {},
+      h("td", {}, h("b", {}, x.owner)),
+      h("td", { class: "n" }, x.issues),
+      h("td", {}, h("div", { style: "display:flex;flex-direction:column;gap:2px" },
+        [...x.videos].sort((a, b) => b.series - a.series).map(v =>
+          h("div", {}, h("span", { style: "color:var(--muted)" }, `第 ${v.series} 期 · `), v.title))))))));
+}
+
+function renderMethod() {
+  const items = [
+    "每一期的数据来自对应的运行目录，同一期采集过多次时，用完成视频最多的那次。",
+    "评论为一级评论全量采集；情感分析基于词典、否定词规则和含义明确的表情，适合做横向比较，不适合逐条精确判断。",
+    `完成度低于 ${Math.round(D.min_compare_completion * 100)}% 的期（例如还在采集中）标记为「采集中」，不计入趋势图，也不会被其他期用作对比。`,
+    "每期周报的「和上期比」「梗雷达」会自动选用最近的完整的更早一期对比。",
+  ];
+  $("method").replaceChildren(h("ul", { style: "margin:0;padding-left:18px" }, items.map(t => h("li", { style: "margin:4px 0" }, t))));
+}
+
+renderHeader(); renderIssues(); renderTrends(); renderTimeline(); renderRegulars(); renderMethod();
+</script>
+</body>
+</html>

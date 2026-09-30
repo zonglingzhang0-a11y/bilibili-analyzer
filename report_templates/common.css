@@ -1,0 +1,106 @@
+/* 周报与总览页共用的样式（由 weekly_report.py 在生成时嵌入） */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --pos: #2a78d6; --neu: #d3d1ca; --neg: #e34948;
+  --wash: rgba(42,120,214,0.08); --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
+    --wash: rgba(57,135,229,0.12); --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
+  --wash: rgba(57,135,229,0.12); --shadow: none;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+a { color: var(--s1); text-decoration: none; } a:hover { text-decoration: underline; }
+main { max-width: 1120px; margin: 0 auto; padding: 0 20px 80px; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* 顶部 */
+.hero { padding: 40px 0 8px; }
+.hero .kicker { color: var(--muted); font-size: 13px; letter-spacing: .02em; }
+.hero h1 { font-size: 30px; line-height: 1.25; margin: 6px 0 4px; font-weight: 650; }
+.hero .sub { color: var(--ink-2); font-size: 14px; }
+nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); margin: 20px -20px 0; padding: 0 20px; }
+nav .links { max-width: 1120px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto;  scrollbar-width: none; }
+nav .links::-webkit-scrollbar { display: none; }
+nav a { color: var(--ink-2); padding: 12px 10px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--ink); text-decoration: none; border-bottom-color: var(--axis); }
+
+section { margin-top: 44px; }
+section > h2 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-width: 760px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+
+/* 指标 */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; margin-top: 24px; }
+.kpi { padding: 16px 18px; }
+.kpi .label { color: var(--muted); font-size: 12px; }
+.kpi .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
+.kpi .delta { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+
+/* 情感条 */
+.senti { display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; }
+.senti span { display: block; height: 100%; }
+.senti .p { background: var(--pos); } .senti .n { background: var(--neu); } .senti .x { background: var(--neg); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend i.line { height: 2px; width: 14px; border-radius: 1px; vertical-align: 3px; }
+
+blockquote { margin: 0; padding: 10px 12px; background: var(--wash); border-radius: 8px; font-size: 14px; }
+blockquote .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink-2); }
+
+/* 表格与条形 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.tw { overflow-x: auto; }
+.bars { display: flex; flex-direction: column; gap: 10px; }
+.bar-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 10px; align-items: center; }
+.bar-row .label { font-size: 13px; line-height: 1.4; }
+.bar-row .label small { color: var(--muted); }
+.bar-row .track { height: 8px; background: var(--grid); border-radius: 4px; margin-top: 5px; }
+.bar-row .fill { height: 100%; background: var(--s1); border-radius: 4px; }
+.bar-row .v { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; }
+.pad { padding: 18px 20px; }
+.pad h3 { margin: 0 0 12px; font-size: 15px; }
+.note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--wash); color: var(--s1); margin-left: 6px; }
+
+/* 图表 */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .axis text { fill: var(--muted); font-size: 11px; }
+.chart .grid line { stroke: var(--grid); stroke-width: 1; }
+.chart .base { stroke: var(--axis); stroke-width: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 120px; max-width: 260px; z-index: 5; }
+.tip .v { font-size: 14px; font-weight: 650; }
+.tip .k { color: var(--muted); }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.tip .key { width: 12px; height: 2px; border-radius: 1px; }
+.tip ul { margin: 4px 0 0; padding-left: 16px; color: var(--ink-2); }
+@media (max-width: 640px) {
+  .split { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 24px; }
+}

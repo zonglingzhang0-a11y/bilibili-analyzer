@@ -118,3 +118,20 @@ def test_find_previous_run_skips_incomplete_issue(tmp_path):
     (partial / "resume_state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     current = _make_run(tmp_path, "20260915_000000", 102, "xswl")
     assert weekly_report.find_previous_run(str(current)) == str(complete)
+
+
+def test_index_page_summarizes_all_issues(tmp_path, monkeypatch):
+    monkeypatch.setattr(weekly_report, "MIN_COMMENTS", 10)
+    for name, series, meme in (("20260901_000000", 100, "awsl"), ("20260908_000000", 101, "xswl")):
+        weekly_report.generate_weekly_report(str(_make_run(tmp_path, name, series, meme)))
+
+    index = tmp_path / weekly_report.INDEX_NAME
+    html = index.read_text(encoding="utf-8")
+    assert "{{" not in html
+    payload = html.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    data = json.loads(payload)
+    assert [i["series"]["number"] for i in data["issues"]] == [100, 101]
+    assert data["issues"][1]["compared_with"] == 100 and data["issues"][1]["memes"][0] == "xswl"
+    assert data["issues"][0]["report"] == "20260901_000000/weekly_report.html"
+    assert {r["owner"] for r in data["regulars"]} == {"UP甲", "UP乙", "UP丙"}
+    assert all(r["issues"] == 2 for r in data["regulars"])

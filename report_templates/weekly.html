@@ -5,69 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{TITLE}}</title>
 <style>
-:root {
-  color-scheme: light;
-  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
-  --s1: #2a78d6; --s2: #eb6834; --pos: #2a78d6; --neu: #d3d1ca; --neg: #e34948;
-  --wash: rgba(42,120,214,0.08); --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
-}
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    color-scheme: dark;
-    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-    --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
-    --wash: rgba(57,135,229,0.12); --shadow: none;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-  --s1: #3987e5; --s2: #d95926; --pos: #3987e5; --neu: #4a4945; --neg: #e66767;
-  --wash: rgba(57,135,229,0.12); --shadow: none;
-}
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 64px; }
-body { margin: 0; background: var(--page); color: var(--ink);
-  font: 15px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
-a { color: var(--s1); text-decoration: none; } a:hover { text-decoration: underline; }
-main { max-width: 1120px; margin: 0 auto; padding: 0 20px 80px; }
-.num { font-variant-numeric: tabular-nums; }
-
-/* 顶部 */
-.hero { padding: 40px 0 8px; }
-.hero .kicker { color: var(--muted); font-size: 13px; letter-spacing: .02em; }
-.hero h1 { font-size: 30px; line-height: 1.25; margin: 6px 0 4px; font-weight: 650; }
-.hero .sub { color: var(--ink-2); font-size: 14px; }
-nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--page) 88%, transparent);
-  backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); margin: 20px -20px 0; padding: 0 20px; }
-nav .links { max-width: 1120px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto;  scrollbar-width: none; }
-nav .links::-webkit-scrollbar { display: none; }
-nav a { color: var(--ink-2); padding: 12px 10px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; }
-nav a:hover { color: var(--ink); text-decoration: none; border-bottom-color: var(--axis); }
-
-section { margin-top: 44px; }
-section > h2 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
-section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-width: 760px; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
-
-/* 指标 */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; margin-top: 24px; }
-.kpi { padding: 16px 18px; }
-.kpi .label { color: var(--muted); font-size: 12px; }
-.kpi .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
-.kpi .delta { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
-
-/* 情感条 */
-.senti { display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; }
-.senti span { display: block; height: 100%; }
-.senti .p { background: var(--pos); } .senti .n { background: var(--neu); } .senti .x { background: var(--neg); }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-.legend i.line { height: 2px; width: 14px; border-radius: 1px; vertical-align: 3px; }
-
+{{COMMON_CSS}}
+.back { display: inline-block; font-size: 13px; margin-bottom: 10px; }
 /* 看点 */
 .insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 14px; }
 .insight { padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
@@ -78,10 +17,6 @@ section > .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-wi
 .insight .text { color: var(--ink-2); font-size: 14px; }
 .insight img { width: 100%; border-radius: 8px; display: block; }
 .insight .open { align-self: flex-start; font-size: 13px; background: none; border: 0; padding: 0; color: var(--s1); cursor: pointer; }
-blockquote { margin: 0; padding: 10px 12px; background: var(--wash); border-radius: 8px; font-size: 14px; }
-blockquote .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink-2); }
 
 /* 视频墙 */
 .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
@@ -99,40 +34,6 @@ input[type=search] { min-width: min(220px, 100%); }
 .vcard .t { font-weight: 600; font-size: 14px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .vcard .o { color: var(--muted); font-size: 12px; }
 .vcard .stats { display: flex; gap: 10px; color: var(--ink-2); font-size: 12px; margin-top: auto; }
-
-/* 表格与条形 */
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
-th { color: var(--muted); font-weight: 500; white-space: nowrap; }
-td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-tbody tr:last-child td { border-bottom: 0; }
-.tw { overflow-x: auto; }
-.bars { display: flex; flex-direction: column; gap: 10px; }
-.bar-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 10px; align-items: center; }
-.bar-row .label { font-size: 13px; line-height: 1.4; }
-.bar-row .label small { color: var(--muted); }
-.bar-row .track { height: 8px; background: var(--grid); border-radius: 4px; margin-top: 5px; }
-.bar-row .fill { height: 100%; background: var(--s1); border-radius: 4px; }
-.bar-row .v { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
-.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; }
-.pad { padding: 18px 20px; }
-.pad h3 { margin: 0 0 12px; font-size: 15px; }
-.note { color: var(--muted); font-size: 12px; margin-top: 10px; }
-.badge { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--wash); color: var(--s1); margin-left: 6px; }
-
-/* 图表 */
-.chart { position: relative; }
-.chart svg { display: block; width: 100%; overflow: visible; }
-.chart .axis text { fill: var(--muted); font-size: 11px; }
-.chart .grid line { stroke: var(--grid); stroke-width: 1; }
-.chart .base { stroke: var(--axis); stroke-width: 1; }
-.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 120px; max-width: 260px; z-index: 5; }
-.tip .v { font-size: 14px; font-weight: 650; }
-.tip .k { color: var(--muted); }
-.tip .row { display: flex; align-items: center; gap: 6px; }
-.tip .key { width: 12px; height: 2px; border-radius: 1px; }
-.tip ul { margin: 4px 0 0; padding-left: 16px; color: var(--ink-2); }
 
 /* 详情抽屉 */
 .drawer { position: fixed; inset: 0; z-index: 50; display: none; }
@@ -160,14 +61,14 @@ tbody tr:last-child td { border-bottom: 0; }
 .kw .e { color: var(--ink-2); }
 .quotes { display: grid; gap: 10px; }
 @media (max-width: 640px) {
-  .dhead { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; }
-  .hero h1 { font-size: 24px; } .drawer .panel { padding: 16px; }
+  .dhead { grid-template-columns: 1fr; } .drawer .panel { padding: 16px; }
 }
 </style>
 </head>
 <body>
 <main>
   <header class="hero">
+    <a class="back" href="../index.html">← 所有期总览</a>
     <div class="kicker" id="kicker"></div>
     <h1 id="headline"></h1>
     <div class="sub" id="subline"></div>
@@ -245,136 +146,9 @@ tbody tr:last-child td { border-bottom: 0; }
 <script id="data" type="application/json">{{DATA}}</script>
 <script>
 "use strict";
+{{COMMON_JS}}
 const D = JSON.parse(document.getElementById("data").textContent);
 const byAid = new Map(D.videos.map(v => [v.aid, v]));
-const $ = id => document.getElementById(id);
-const fmt = n => n == null ? "–" : Math.round(n).toLocaleString("zh-CN");
-const pct = (x, d = 1) => x == null ? "–" : (x * 100).toFixed(d) + "%";
-const wan = n => n >= 1e8 ? (n / 1e8).toFixed(2) + " 亿" : n >= 10000 ? (n / 10000).toFixed(n >= 1e6 ? 0 : 1) + " 万" : fmt(n);
-const hours = h => h == null ? "–" : h < 10 ? h.toFixed(1) + " 小时" : Math.round(h) + " 小时";
-
-// 创建元素：字符串一律作为文本插入（数据来自评论等不可信内容）
-function h(tag, attrs, ...kids) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v == null || v === false) continue;
-    if (k === "class") node.className = v;
-    else if (k === "style") node.style.cssText = v;
-    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v === true ? "" : v);
-  }
-  for (const kid of kids.flat()) {
-    if (kid == null || kid === false) continue;
-    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return node;
-}
-const svg = (tag, attrs) => {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
-  return node;
-};
-
-function sentiBar(s, height) {
-  const total = (s.positive + s.neutral + s.negative) || 1;
-  const bar = h("div", { class: "senti", style: height ? `height:${height}px` : "",
-    title: `正面 ${pct(s.positive / total)} · 中性 ${pct(s.neutral / total)} · 负面 ${pct(s.negative / total)}` });
-  [["p", s.positive], ["n", s.neutral], ["x", s.negative]].forEach(([c, v]) => {
-    if (v > 0) bar.append(h("span", { class: c, style: `flex:${v}` }));
-  });
-  return bar;
-}
-function quote(q) {
-  if (!q || !q.text) return null;
-  const meta = [q.like != null ? `👍 ${fmt(q.like)}` : null, q.replies ? `💬 ${fmt(q.replies)} 条回复` : null].filter(Boolean).join(" · ");
-  return h("blockquote", {}, "「", q.text, "」", meta ? h("div", { class: "meta" }, meta) : null);
-}
-
-/* ── 通用折线图：十字准线 + 悬停提示，可多条线 ── */
-function lineChart(host, opt) {
-  const { series, xLabel, tooltipExtra, markers = [], yFormat = fmt, height = 200, area = true } = opt;
-  const n = series[0].values.length;
-  if (!n) { host.append(h("div", { class: "note" }, "没有数据")); return; }
-  const tip = h("div", { class: "tip", style: "display:none" });
-  host.append(tip);
-  let svgEl;
-  function draw() {
-    if (svgEl) svgEl.remove();
-    const W = Math.max(host.clientWidth, 280), H = height;
-    const m = { l: 44, r: series.length > 1 ? 58 : 12, t: 12, b: 26 };
-    const iw = W - m.l - m.r, ih = H - m.t - m.b;
-    const maxY = Math.max(1e-9, ...series.flatMap(s => s.values));
-    const step = niceStep(maxY / 4);
-    const top = Math.ceil(maxY / step) * step;
-    const x = i => m.l + (n === 1 ? iw / 2 : i / (n - 1) * iw);
-    const y = v => m.t + ih - v / top * ih;
-    svgEl = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" });
-    const grid = svg("g", { class: "grid" }), axis = svg("g", { class: "axis" });
-    for (let v = 0; v <= top + 1e-9; v += step) {
-      grid.append(svg("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
-      const t = svg("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }); t.textContent = yFormat(v); axis.append(t);
-    }
-    const ticks = Math.min(7, n);
-    for (let k = 0; k < ticks; k++) {
-      const i = Math.round(k / Math.max(1, ticks - 1) * (n - 1));
-      const t = svg("text", { x: x(i), y: H - 6, "text-anchor": k === 0 ? "start" : k === ticks - 1 ? "end" : "middle" });
-      t.textContent = xLabel(i); axis.append(t);
-    }
-    svgEl.append(grid, axis, svg("line", { class: "base", x1: m.l, x2: W - m.r, y1: y(0), y2: y(0) }));
-    series.forEach(s => {
-      const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
-      if (area && series.length === 1)
-        svgEl.append(svg("path", { d: `M${x(0)},${y(0)}L${pts.join("L")}L${x(n - 1)},${y(0)}Z`, fill: s.color, opacity: 0.12 }));
-      svgEl.append(svg("path", { d: "M" + pts.join("L"), fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-    });
-    if (series.length > 1) {
-      const ends = series.map(s => ({ s, y: y(s.values[n - 1]) })).sort((p, q) => p.y - q.y);
-      for (let k = 1; k < ends.length; k++) ends[k].y = Math.max(ends[k].y, ends[k - 1].y + 13);
-      ends.forEach(({ s, y: ly }) => {
-        const t = svg("text", { x: W - m.r + 4, y: ly + 4, fill: "var(--ink-2)", "font-size": 11 });
-        t.textContent = s.name; svgEl.append(t);
-      });
-    }
-    markers.forEach(mk => {
-      const v = series[0].values[mk.i] || 0;
-      svgEl.append(svg("circle", { cx: x(mk.i), cy: y(v), r: 5, fill: series[0].color, stroke: "var(--surface)", "stroke-width": 2 }));
-      if (mk.label) { const t = svg("text", { x: x(mk.i), y: y(v) - 10, "text-anchor": "middle", fill: "var(--ink-2)", "font-size": 11 }); t.textContent = mk.label; svgEl.append(t); }
-    });
-    const cross = svg("line", { y1: m.t, y2: m.t + ih, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" });
-    const dots = series.map(s => svg("circle", { r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }));
-    svgEl.append(cross, ...dots);
-    const hit = svg("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
-    svgEl.append(hit);
-    const move = ev => {
-      const r = svgEl.getBoundingClientRect();
-      const px = (ev.clientX - r.left) * W / r.width;
-      const i = Math.max(0, Math.min(n - 1, Math.round((px - m.l) / iw * (n - 1))));
-      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
-      dots.forEach((d, k) => { d.setAttribute("cx", x(i)); d.setAttribute("cy", y(series[k].values[i])); d.setAttribute("visibility", "visible"); });
-      tip.replaceChildren(
-        ...series.map(s => h("div", { class: "row" },
-          series.length > 1 ? h("span", { class: "key", style: `background:${s.color}` }) : null,
-          h("span", { class: "v" }, yFormat(s.values[i])), h("span", { class: "k" }, s.name))),
-        h("div", { class: "k" }, xLabel(i)),
-        tooltipExtra ? tooltipExtra(i) : null);
-      tip.style.display = "block";
-      const tx = x(i) / W * r.width, tw = tip.offsetWidth;
-      tip.style.left = Math.min(Math.max(0, tx + 12), r.width - tw) + "px";
-      tip.style.top = "0px";
-    };
-    hit.addEventListener("pointermove", move);
-    hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); });
-    host.prepend(svgEl);
-  }
-  draw();
-  new ResizeObserver(() => draw()).observe(host);
-}
-function niceStep(raw) {
-  const p = Math.pow(10, Math.floor(Math.log10(raw || 1)));
-  const f = raw / p;
-  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
-}
-const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 /* ── 顶部 ── */
 function renderHeader() {
