@@ -86,6 +86,11 @@ def test_annotate_stops_on_fatal_error_and_keeps_progress(tmp_path, monkeypatch)
     assert sorted(done) == [0, 10]
 
 
+def test_clean_key_strips_paste_artifacts():
+    assert llm_sentiment.clean_key("\x1b[200~sk-abc123\x1b[201~\r\n") == "sk-abc123"
+    assert llm_sentiment.clean_key("﻿ sk-abc\x16 ") == "sk-abc"
+
+
 def test_load_key_prefers_env(tmp_path, monkeypatch):
     path = tmp_path / ".deepseek_key"
     llm_sentiment.save_key("  from-file \n", str(path))

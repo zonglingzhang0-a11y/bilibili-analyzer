@@ -19,6 +19,8 @@ import getpass
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -90,10 +92,34 @@ def load_key(path: str = DEFAULT_KEY_FILE) -> str | None:
     if key:
         return key
     try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip() or None
+        with open(path, "rb") as f:
+            raw = f.read()
     except OSError:
         return None
+    # 记事本可能存成带 BOM 的 UTF-8 或 UTF-16
+    encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    return clean_key(raw.decode(encoding, errors="ignore")) or None
+
+
+def clean_key(value: str) -> str:
+    """去掉粘贴时终端可能夹带的控制字符（如括号粘贴模式的 ESC[200~ … ESC[201~）、BOM 和空白"""
+    value = re.sub(r"\x1b\[20[01]~", "", value or "")
+    return "".join(ch for ch in value if ch.isprintable() and not ch.isspace()).lstrip("﻿")
+
+
+def read_clipboard() -> str:
+    """读取剪贴板文本（Windows 用 PowerShell，其他系统用 tkinter）"""
+    if sys.platform == "win32":
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15)
+        return result.stdout
+    import tkinter
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        return root.clipboard_get()
+    finally:
+        root.destroy()
 
 
 def save_key(value: str, path: str = DEFAULT_KEY_FILE):
@@ -410,16 +436,26 @@ def main():
     parser.add_argument("--workers", type=int, default=WORKERS, help=f"并发请求数（默认 {WORKERS}）")
     parser.add_argument("--no-report", action="store_true", help="标注完不重新生成周报")
     parser.add_argument("--set-key", action="store_true", help="输入并保存 DeepSeek API key（输入时不显示）")
+    parser.add_argument("--clipboard", action="store_true",
+                        help="配合 --set-key：直接从剪贴板读取 key（终端里粘贴不了时用，先复制 key 再运行）")
     parser.add_argument("--check", action="store_true", help="检查 API key 和账户余额")
     args = parser.parse_args()
 
     if args.set_key:
-        value = getpass.getpass("粘贴 DeepSeek API key 后回车（输入不会显示）: ").strip()
+        if args.clipboard:
+            value = clean_key(read_clipboard())
+        else:
+            print("提示：粘贴不了时，先复制 key，再运行 python llm_sentiment.py --set-key --clipboard")
+            value = clean_key(getpass.getpass("粘贴 DeepSeek API key 后回车（输入不会显示）: "))
         if not value:
-            print("未输入，已取消")
+            print("没有读到 key，已取消" + ("（剪贴板是空的？）" if args.clipboard else ""))
             return
+        if not value.startswith("sk-"):
+            # 不打印内容，只提示长度和开头，方便判断是不是复制错了
+            print(f"⚠️ 读到的内容不像 DeepSeek key（{len(value)} 个字符，不是以 sk- 开头），未保存")
+            sys.exit(1)
         save_key(value)
-        print(f"✅ 已保存到 {DEFAULT_KEY_FILE}")
+        print(f"✅ 已保存到 {DEFAULT_KEY_FILE}（{len(value)} 个字符）")
         args.check = True
 
     key = load_key()
