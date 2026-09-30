@@ -1,5 +1,6 @@
-# B站登录 Cookie（敏感信息，绝对不能上传）
+# B站登录 Cookie 和 DeepSeek API key（敏感信息，绝对不能上传）
 .sessdata
+.deepseek_key
 
 # 输出目录（分析结果，体积大）
 bilibili_output/

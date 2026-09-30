@@ -60,6 +60,13 @@ input[type=search] { min-width: min(220px, 100%); }
 .kw .w { font-weight: 600; } .kw .w small { color: var(--muted); font-weight: 400; }
 .kw .e { color: var(--ink-2); }
 .quotes { display: grid; gap: 10px; }
+/* 大模型情感 */
+.vs { display: grid; gap: 14px; }
+.vs .row .name { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
+.senti-chip { display: inline-block; font-size: 12px; padding: 0 7px; border-radius: 4px; white-space: nowrap; }
+.senti-chip.positive { background: var(--pos); color: #fff; }
+.senti-chip.neutral { background: var(--neu); color: var(--ink); }
+.senti-chip.negative { background: var(--neg); color: #fff; }
 @media (max-width: 640px) {
   .dhead { grid-template-columns: 1fr; } .drawer .panel { padding: 16px; }
 }
@@ -80,6 +87,19 @@ input[type=search] { min-width: min(220px, 100%); }
     <h2>本期看点</h2>
     <p class="lede" id="insights-lede"></p>
     <div class="insights" id="insights"></div>
+  </section>
+
+  <section id="llm-sec" hidden>
+    <h2>大模型情感分析</h2>
+    <p class="lede" id="llm-lede"></p>
+    <div class="split">
+      <div class="card pad"><h3>两种方法的判断</h3><div class="vs" id="llm-vs"></div><div class="note" id="llm-note"></div></div>
+      <div class="card pad"><h3>评论类型</h3><p class="lede" style="margin:0 0 10px">大模型给每条评论归的类，按评论数加权推算到全部评论。</p><div class="bars" id="llm-cats"></div></div>
+    </div>
+    <div class="card tw" style="margin-top:14px"><table id="llm-examples"></table></div>
+    <details style="margin-top:16px"><summary style="cursor:pointer;color:var(--ink-2);font-size:14px">查看每个视频的对比</summary>
+      <div class="card tw" style="margin-top:10px"><table id="llm-table"></table></div>
+    </details>
   </section>
 
   <section id="wall-sec">
@@ -170,8 +190,8 @@ function renderHeader() {
   ];
   $("kpis").replaceChildren(...tiles.map(([l, v, d]) => h("div", { class: "card kpi" },
     h("div", { class: "label" }, l), h("div", { class: "value" }, v), d ? h("div", { class: "delta" }, d) : null)));
-  const links = [["insights-sec", "本期看点"], ["wall-sec", "视频一览"], ["radar-sec", "梗雷达"], ["overlap-sec", "观众重合"],
-    ["life-sec", "热度寿命"], ["compare-sec", "和上期比"], ["method-sec", "数据与方法"]];
+  const links = [["insights-sec", "本期看点"], ...(D.llm ? [["llm-sec", "大模型情感"]] : []), ["wall-sec", "视频一览"],
+    ["radar-sec", "梗雷达"], ["overlap-sec", "观众重合"], ["life-sec", "热度寿命"], ["compare-sec", "和上期比"], ["method-sec", "数据与方法"]];
   $("nav").replaceChildren(...links.map(([id, t]) => h("a", { href: "#" + id }, t)));
 }
 
@@ -191,6 +211,50 @@ function renderInsights() {
         v ? h("button", { class: "open", onclick: () => openDetail(v.aid) }, "查看视频 →") : null,
         it.link ? h("a", { href: it.link, target: "_blank", rel: "noopener", style: "font-size:13px" }, "到 B站 看这一刻 ↗") : null));
   }));
+}
+
+/* ── 大模型情感 ── */
+const SENTI_NAME = { positive: "正面", neutral: "中性", negative: "负面" };
+const sentiChip = k => h("span", { class: "senti-chip " + k }, SENTI_NAME[k]);
+const rates = (pos, neg) => ({ positive: pos, neutral: Math.max(0, 1 - pos - neg), negative: neg });
+function sentiRow(name, r) {
+  return h("div", { class: "row" }, h("div", { class: "name" }, name), sentiBar(r, 12),
+    h("div", { class: "legend", style: "margin-top:6px" },
+      ...["positive", "neutral", "negative"].map(k => h("span", {}, h("i", { style: `background:var(--${k.slice(0, 3)})` }), `${SENTI_NAME[k]} ${pct(r[k])}`))));
+}
+function renderLLM() {
+  const L = D.llm;
+  if (!L) return;
+  $("llm-sec").hidden = false;
+  $("llm-lede").textContent = `用大模型（${L.model}）对 ${fmt(L.sampled)} 条一级评论逐条判断情感和评论类型，` +
+    (L.full ? "覆盖全部评论。" : `每个视频随机抽样，各视频的比例按评论数加权推算到全部评论（${L.videos} 个视频）。`) +
+    "词典方法只认识情感词表里的词，大模型能结合语境读懂反讽、玩梗和 B站 用语。";
+  $("llm-vs").replaceChildren(
+    sentiRow("词典方法（全部评论）", rates(L.dict_positive_rate, L.dict_negative_rate)),
+    sentiRow(`大模型${L.full ? "" : "（抽样推算）"}`, rates(L.positive_rate, L.negative_rate)));
+  const c = L.confusion, row = k => ["positive", "neutral", "negative"].reduce((a, b) => a + (c[`${k}>${b}`] || 0), 0);
+  const neutral = row("neutral") || 1;
+  $("llm-note").textContent = `同一批评论上两种方法判断一致的占 ${pct(L.agreement)}。词典判为中性的评论里，大模型认为 ` +
+    `${pct((c["neutral>positive"] || 0) / neutral)} 其实是正面、${pct((c["neutral>negative"] || 0) / neutral)} 是负面；` +
+    `词典判为正面的评论里，有 ${pct((c["positive>negative"] || 0) / (row("positive") || 1))} 被大模型判为负面（多是反讽）。`;
+  const maxCat = Math.max(...L.categories.map(x => x.share), 0.001);
+  $("llm-cats").replaceChildren(...L.categories.map(x => h("div", { class: "bar-row" },
+    h("div", { class: "label" }, h("b", {}, x.name),
+      h("div", { class: "track" }, h("div", { class: "fill", style: `width:${x.share / maxCat * 100}%` }))),
+    h("div", { class: "v" }, pct(x.share)))));
+  $("llm-examples").replaceChildren(
+    h("thead", {}, h("tr", {}, h("th", {}, "两种方法判断不同的高赞评论"), h("th", {}, "词典"), h("th", {}, "大模型"), h("th", { class: "n" }, "点赞"))),
+    h("tbody", {}, L.examples.map(x => h("tr", {},
+      h("td", {}, x.text, h("div", { style: "font-size:12px" }, h("a", { href: "#", onclick: e => { e.preventDefault(); openDetail(x.aid); } },
+        (byAid.get(x.aid) || {}).title || ""))),
+      h("td", {}, sentiChip(x.dict)), h("td", {}, sentiChip(x.llm)), h("td", { class: "n" }, fmt(x.like))))));
+  const cols = [["视频", v => v.title], ["标注条数", v => fmt(v.llm.n), 1], ["大模型 正面", v => pct(v.llm.positive_rate), 1],
+    ["大模型 负面", v => pct(v.llm.negative_rate), 1], ["词典 正面", v => pct(v.positive_rate), 1], ["词典 负面", v => pct(v.negative_rate), 1],
+    ["一致率", v => pct(v.llm.agreement), 1]];
+  $("llm-table").replaceChildren(
+    h("thead", {}, h("tr", {}, cols.map(([t, , n]) => h("th", { class: n ? "n" : "" }, t)))),
+    h("tbody", {}, D.videos.filter(v => v.llm).sort((a, b) => b.comments - a.comments).map(v =>
+      h("tr", {}, cols.map(([, f, n]) => h("td", { class: n ? "n" : "" }, f(v)))))));
 }
 
 /* ── 视频墙 ── */
@@ -328,6 +392,10 @@ function renderCompare() {
     ["弹幕密度中位数（条/分）", a.median_density, b.median_density, v => v.toFixed(0)],
     ["正面评论占比", a.positive_rate, b.positive_rate, v => pct(v), true], ["负面评论占比", a.negative_rate, b.negative_rate, v => pct(v), true],
     ["凌晨评论占比", a.late_night, b.late_night, v => pct(v), true], ["评论半衰期中位数", a.median_half_life, b.median_half_life, hours]];
+  if (a.llm_positive_rate != null && b.llm_positive_rate != null) {
+    rows.splice(8, 0, ["正面占比（大模型）", a.llm_positive_rate, b.llm_positive_rate, v => pct(v), true],
+      ["负面占比（大模型）", a.llm_negative_rate, b.llm_negative_rate, v => pct(v), true]);
+  }
   const arrow = c => c > 0 ? "▲ " : c < 0 ? "▼ " : "";
   const change = (x, y, isRate) => {
     if (isRate) { const d = (x - y) * 100; return arrow(d) + Math.abs(d).toFixed(1) + " 个百分点"; }
@@ -359,6 +427,9 @@ function renderMethod() {
     `复制刷屏：去掉标点、空白和表情后，开头 ${D.copy_rule.chars} 个字相同（且不短于 ${D.copy_rule.min_chars} 个字）的评论视为同一段文字，在一个视频里出现至少 ${D.copy_rule.repeats} 次算刷屏（常见于抽奖模板、广告和机器号）。统计词频、关键词、表情和梗雷达时每段只算一条；评论数和情感占比仍按每条计算。`,
     "弹幕是播放器当前显示的弹幕池，少于历史弹幕总数；弹幕热度曲线按 10 秒一段统计。",
   ];
+  if (D.llm) items.splice(2, 0, `大模型情感：把评论正文（不含用户名、UID）分批发给 ${D.llm.model}，逐条标注情感（正面/中性/负面）和评论类型。` +
+    (D.llm.full ? "覆盖全部评论。" : "每个视频随机抽样（按评论 ID 的哈希排序取前若干条），全期比例按各视频评论数加权推算。") +
+    "其余排行、看点仍基于词典方法。");
   $("method").replaceChildren(h("ul", { style: "margin:0;padding-left:18px" }, items.map(t => h("li", { style: "margin:4px 0" }, t))),
     h("div", { class: "note" }, `数据目录：${D.run_dir}`));
 }
@@ -390,6 +461,10 @@ function openDetail(aid) {
           h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(v.sentiment.negative / total)}`)),
         v.top_emojis && v.top_emojis.length ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:6px" },
           "最常用表情：", v.top_emojis.map(x => `[${x.name}] ${fmt(x.count)}`).join(" · ")) : null,
+        v.llm ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:6px" },
+          `大模型（${v.llm.coverage >= 0.99 ? "全部" : "抽样 " + fmt(v.llm.n) + " 条"}）：正面 ${pct(v.llm.positive_rate)} · 负面 ${pct(v.llm.negative_rate)}` +
+          ` · 与词典一致 ${pct(v.llm.agreement)}；类型最多的是 ` +
+          Object.entries(v.llm.categories).slice(0, 3).map(([k, n]) => `${k} ${pct(n / v.llm.n, 0)}`).join("、")) : null,
         v.copies ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:4px" },
           `复制刷屏：${fmt(v.copies)} 条（占一级评论 ${pct(v.copy_share)}，${v.copy_templates} 段文字），词频里每段只算一条`) : null,
         v.link ? h("div", { style: "margin-top:10px" }, h("a", { href: v.link, target: "_blank", rel: "noopener" }, "在 B站 打开 ↗")) : null)),
@@ -417,7 +492,10 @@ function openDetail(aid) {
         v.best_positive ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的正面评论") : null, quote(v.best_positive),
         v.best_negative ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的负面评论") : null, quote(v.best_negative),
         v.copy_top ? h("div", { class: "note", style: "margin:6px 0 0" }, `被复制最多的一段（${fmt(v.copy_top.count)} 次）`) : null,
-        v.copy_top ? quote({ text: v.copy_top.text }) : null)));
+        v.copy_top ? quote({ text: v.copy_top.text }) : null,
+        v.llm && v.llm.examples.length ? h("div", { class: "note", style: "margin:6px 0 0" }, "词典和大模型判断不同的高赞评论") : null,
+        ...(v.llm ? v.llm.examples.map(x => h("blockquote", {}, "「", x.text, "」",
+          h("div", { class: "meta" }, `👍 ${fmt(x.like)} · 词典：`, sentiChip(x.dict), " 大模型：", sentiChip(x.llm)))) : []))));
   $("drawer").classList.add("open");
   document.body.style.overflow = "hidden";
   // 高潮按 6 秒窗口检测，曲线按 10 秒分段：窗口可能跨两段，标在较高的那一段上
@@ -442,7 +520,7 @@ function closeDetail() {
 $("drawer").addEventListener("click", e => { if (e.target.closest("[data-close]")) closeDetail(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
 
-renderHeader(); renderInsights(); renderWall(); renderRadar(); renderEmojis(); renderOverlap(); renderLife(); renderCompare(); renderMethod();
+renderHeader(); renderInsights(); renderLLM(); renderWall(); renderRadar(); renderEmojis(); renderOverlap(); renderLife(); renderCompare(); renderMethod();
 </script>
 </body>
 </html>

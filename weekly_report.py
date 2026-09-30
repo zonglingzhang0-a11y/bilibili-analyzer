@@ -20,6 +20,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 
+from llm_sentiment import decode as decode_llm_label, read_label_file
 from rebuild import _load_json, _series_info, _video_dirs
 from report_writer import _resolve_asset
 from stats import EMOJI_RE, analyze_sentiment, extract_emojis, segment_text
@@ -120,6 +121,48 @@ def _copy_templates(comments: list[dict]) -> tuple[list[str | None], dict[str, i
     return keys, {k: n for k, n in counts.items() if n >= COPY_MIN_REPEATS}
 
 
+SENTIMENTS = ("positive", "neutral", "negative")
+
+
+def _llm_view(video_dir: str, comments: list[dict], dict_labels: list[str]) -> dict | None:
+    """大模型标注（抽样或全量，见 llm_sentiment.py）的统计，并和同一批评论的词典判断对比；没有标注时返回 None"""
+    data = read_label_file(video_dir)
+    if not data:
+        return None
+    stored = data["labels"]
+    sentiment, categories, confusion = Counter(), Counter(), Counter()
+    diffs = []
+    for comment, dict_label in zip(comments, dict_labels):
+        label = stored.get(str(comment.get("rpid")))
+        if not label:
+            continue
+        llm_label, category = decode_llm_label(label)
+        sentiment[llm_label] += 1
+        categories[category] += 1
+        confusion[f"{dict_label}>{llm_label}"] += 1
+        content = comment.get("content", "").strip()
+        if llm_label != dict_label and len(content) >= 6:
+            diffs.append({"text": _clip(content, 120), "like": comment.get("like", 0),
+                          "dict": dict_label, "llm": llm_label})
+    n = sum(sentiment.values())
+    if not n:
+        return None
+    diffs.sort(key=lambda d: -d["like"])
+    return {
+        "n": n,
+        "coverage": n / len(comments),
+        "model": data.get("model", ""),
+        "sentiment": {k: sentiment[k] for k in SENTIMENTS},
+        "positive_rate": sentiment["positive"] / n,
+        "negative_rate": sentiment["negative"] / n,
+        "categories": dict(categories.most_common()),
+        "agreement": sum(confusion[f"{k}>{k}"] for k in SENTIMENTS) / n,
+        "examples": diffs[:4],
+        "_confusion": confusion,
+        "_diffs": diffs[:30],
+    }
+
+
 def _best_comment(comments: list[dict], labels: list[str], wanted: str | None = None,
                   exclude: set[int] = frozenset()):
     """点赞最高的一条（可限定情感），过滤过短的内容和已经展示过的评论"""
@@ -148,6 +191,7 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
 
     labels = [analyze_sentiment(c.get("content", "")) for c in comments]
     sentiment = Counter(labels)
+    llm = _llm_view(video_dir, comments, labels)
     count = len(comments)
     sub_replies = sum(c.get("rcount", 0) for c in comments)
     positive_rate = sentiment["positive"] / count if count else 0
@@ -261,12 +305,15 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
         "copy_share": copies / count if count else 0,
         "copy_templates": len(templates),
         "copy_top": copy_top,
+        "llm": {k: v for k, v in llm.items() if not k.startswith("_")} if llm else None,
         # 以下供全期汇总使用，不写入网页
         "_emojis": emojis,
         "_words": words,
         "_danmaku_words": danmaku_words,
         "_mids": {c["mid"] for c in comments if c.get("mid")},
         "_hour_of_day": hour_of_day,
+        "_llm_confusion": llm["_confusion"] if llm else Counter(),
+        "_llm_diffs": llm["_diffs"] if llm else [],
         "_examples": [(comments[i].get("like", 0), comments[i].get("content", ""))
                       for i in ranked[:EXAMPLE_POOL]],
     }
@@ -445,6 +492,49 @@ def _issue_summary(videos: list[dict]) -> dict:
     }
 
 
+LLM_EXAMPLE_KINDS = [("neutral", "negative"), ("neutral", "positive"), ("positive", "negative"),
+                     ("negative", "positive"), ("positive", "neutral"), ("negative", "neutral")]
+
+
+def _llm_summary(videos: list[dict]) -> dict | None:
+    """全期的大模型情感：各视频的样本比例按该视频评论数加权，推算到全部评论；并汇总与词典判断的对比"""
+    labeled = [v for v in videos if v["llm"]]
+    if not labeled:
+        return None
+    weight = sum(v["comments"] for v in labeled) or 1
+    sampled = sum(v["llm"]["n"] for v in labeled)
+
+    def estimate(get) -> float:
+        return sum(get(v) * v["comments"] for v in labeled) / weight
+
+    categories, confusion = Counter(), Counter()
+    by_kind = defaultdict(list)
+    for video in labeled:
+        confusion.update(video["_llm_confusion"])
+        for name, count in video["llm"]["categories"].items():
+            categories[name] += count / video["llm"]["n"] * video["comments"]
+        for diff in video["_llm_diffs"]:
+            by_kind[(diff["dict"], diff["llm"])].append({**diff, "aid": video["aid"]})
+    # 每种「词典 → 大模型」的分歧各取点赞最高的几条
+    examples = [item for kind in LLM_EXAMPLE_KINDS
+                for item in sorted(by_kind.get(kind, []), key=lambda d: -d["like"])[:3]]
+    return {
+        "model": labeled[0]["llm"]["model"],
+        "videos": len(labeled),
+        "sampled": sampled,
+        "full": all(v["llm"]["coverage"] >= 0.99 for v in labeled),
+        "positive_rate": estimate(lambda v: v["llm"]["positive_rate"]),
+        "negative_rate": estimate(lambda v: v["llm"]["negative_rate"]),
+        # 同样这些视频的词典结果（全部评论），用于并排对比
+        "dict_positive_rate": sum(v["sentiment"]["positive"] for v in labeled) / weight,
+        "dict_negative_rate": sum(v["sentiment"]["negative"] for v in labeled) / weight,
+        "agreement": sum(confusion[f"{k}>{k}"] for k in SENTIMENTS) / sampled,
+        "confusion": {f"{a}>{b}": confusion[f"{a}>{b}"] for a in SENTIMENTS for b in SENTIMENTS},
+        "categories": [{"name": name, "share": value / weight} for name, value in categories.most_common()],
+        "examples": examples,
+    }
+
+
 def _insights(videos: list[dict], summary: dict, radar: dict | None, overlap: dict) -> list[dict]:
     """本期看点：结论先行，每条附证据"""
     ranked = [v for v in videos if v["comments"] >= MIN_COMMENTS]
@@ -540,11 +630,17 @@ def analyze_run(run_dir: str, embed_media: bool = True) -> dict:
         title = meta.get(str(aid), {}).get("title") or dir_title
         videos.append(analyze_video(os.path.join(run_dir, entry), aid, title, embed_media))
     _assign_keywords(videos)
+    summary = _issue_summary(videos)
+    llm = _llm_summary(videos)
+    if llm:
+        summary["llm_positive_rate"] = llm["positive_rate"]
+        summary["llm_negative_rate"] = llm["negative_rate"]
     return {
         "run_dir": os.path.basename(os.path.normpath(run_dir)),
         "series": _complete_series(_series_info(run_dir, state) or {}),
         "videos": videos,
-        "summary": _issue_summary(videos),
+        "summary": summary,
+        "llm": llm,
     }
 
 
@@ -603,6 +699,7 @@ def build_report_data(run_dir: str, compare_dir: str | None = None) -> dict:
         "videos": [_public(v) for v in current["videos"]],
         "radar": radar,
         "emojis": _emoji_board(current["videos"], previous["videos"] if previous else None),
+        "llm": current["llm"],
         "overlap": overlap,
         "regulars": regulars,
         "min_comments": MIN_COMMENTS,

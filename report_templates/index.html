@@ -119,7 +119,9 @@ function renderIssues() {
           sentiBar({ positive: pos, neutral: Math.max(0, 1 - pos - neg), negative: neg }),
           h("div", { class: "legend", style: "margin-top:6px" },
             h("span", {}, h("i", { style: "background:var(--pos)" }), `正面 ${pct(pos)}`),
-            h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(neg)}`))),
+            h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(neg)}`)),
+          s.llm_positive_rate != null ? h("div", { style: "font-size:12px;color:var(--ink-2);margin-top:4px" },
+            `大模型判断：正面 ${pct(s.llm_positive_rate)} · 负面 ${pct(s.llm_negative_rate)}`) : null),
         rows.length ? h("dl", { class: "hl" }, rows.flatMap(([t, x]) =>
           [h("dt", {}, t), h("dd", { title: `${x.subject}（${x.value}）` }, `${x.subject}（${x.value}）`)])) : null,
         i.memes && i.memes.length ? h("div", { class: "chips" }, i.memes.slice(0, 6).map(m => h("span", { class: "chip" }, m))) : null,
@@ -147,6 +149,10 @@ function renderTrends() {
     ["评论半衰期中位数", "median_half_life", hours, "一半评论在发布后多少小时内发出，越短说明热度来去越快"],
     ["凌晨评论占比", "late_night", v => pct(v), "0～6 点发出的评论比例"],
   ];
+  if (done.every(i => i.summary.llm_positive_rate != null)) {
+    charts.splice(5, 0, ["正面占比（大模型）", "llm_positive_rate", v => pct(v), "大模型逐条判断（抽样推算）的正面评论比例"],
+      ["负面占比（大模型）", "llm_negative_rate", v => pct(v), "大模型逐条判断（抽样推算）的负面评论比例"]);
+  }
   $("charts").replaceChildren(...charts.map(([title, key, f, sub]) => {
     const host = h("div", { class: "chart" });
     const card = h("div", { class: "card pad" }, h("h3", {}, title), h("div", { class: "sub" }, sub), host);

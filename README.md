@@ -119,7 +119,25 @@ python weekly_report.py --all                                              # 重
 - **观众重合**：评论者群体最接近的几组视频（只做整体统计）
 - **热度寿命与活跃时段**、**和上期比**、**上榜常客**
 
-全部使用统计规则，不调用大模型；指标定义见页面底部「数据与方法」。
+默认全部使用统计规则；做过大模型情感标注（见下节）的期会多出「大模型情感分析」一节。指标定义见页面底部「数据与方法」。
+
+### 大模型情感分析（可选，按量付费）
+
+词典方法读不懂反讽和 B站 用语（例如「绷不住了」「好好好」「下次一定」）。可以用 DeepSeek 大模型逐条标注评论的情感（正面/中性/负面）和类型（夸赞、批评、玩梗、讨论、提问、抽奖打卡），周报里会和词典方法并排对比，并列出两者判断不同的高赞评论。
+
+```bash
+python llm_sentiment.py --set-key                     # 在自己的终端里粘贴 API key（不回显），保存到 .deepseek_key
+python llm_sentiment.py --check                       # 检查 key 和账户余额
+python llm_sentiment.py bilibili_output/20260928_192613             # 每个视频随机抽 300 条
+python llm_sentiment.py bilibili_output/20260928_192613 --sample 1000
+python llm_sentiment.py --all --full --max-cost 80    # 所有期、全部评论，花费上限 80 元
+```
+
+- API key 也可以用环境变量 `DEEPSEEK_API_KEY` 提供；`.deepseek_key` 已加入 `.gitignore`。**不要把 key 发到聊天或提交到仓库。**
+- 只发送评论正文，不发送用户名、UID。相同的文字（比如刷屏模板）只发送一次。
+- 结果按评论 ID 缓存在各视频目录的 `llm_sentiment.json`，中断或达到花费上限后重新运行同样的命令会接着标注；加大 `--sample` 时原有样本保留、只补新增的。
+- 运行前会打印预计花费，结束时打印实际 token 用量和费用（按 `llm_sentiment.py` 顶部的单价估算，价格变动时改那里）。
+- 标注完成后自动重新生成对应周报。
 
 ### 离线重建
 
@@ -143,6 +161,7 @@ bilibili_output/
     └── {aid}_{标题}/
         ├── comments.json / danmaku.json   # 原始数据
         ├── stats.json                     # 统计结果
+        ├── llm_sentiment.json             # 大模型情感标注（可选）
         ├── report.md + charts/            # 报告与图表
         ├── cover.jpg + frames/            # 封面与高潮截图
         └── content_prompts.json           # 画面分析提示词
@@ -181,11 +200,13 @@ python -m pytest
 | `rebuild.py` | 离线重建 |
 | `dashboard.py` | 采集进度看板 |
 | `weekly_report.py` / `report_templates/` | 周报网页与总览页（`common.css` / `common.js` 为两者共用的样式和图表） |
+| `llm_sentiment.py` | 大模型情感标注（DeepSeek，可选） |
 | `checkpoint_manager.py` / `adaptive_retry.py` | 断点续传清单、自适应限流与重试队列 |
 | `wbi.py` / `bili_auth.py` / `bili_http.py` | WBI 签名、登录凭证、公共请求配置 |
 
 ## 已知限制
 
-- 情感分析基于词典和否定词规则，适合看整体倾向，不适合逐条精确判断。
+- 情感分析默认基于词典和否定词规则，适合看整体倾向，不适合逐条精确判断；需要更准时用大模型标注。
+- 大模型标注默认是抽样，全期比例按各视频评论数加权推算；抽样 300 条时单个视频的比例误差约 ±5 个百分点。
 - 多分P视频需要视频参数（默认开启）才能逐P采集弹幕；使用 `--no-content` 时只采集主分P。
 - 高潮截图来自 B站缩略图拼图，分辨率较低，时间点为近似位置。
