@@ -78,7 +78,7 @@ input[type=search] { min-width: min(220px, 100%); }
 
   <section id="insights-sec">
     <h2>本期看点</h2>
-    <p class="lede">从 49 个视频的评论和弹幕里自动找出来的几条结论，每条都附证据。点「查看视频」看详情。</p>
+    <p class="lede" id="insights-lede"></p>
     <div class="insights" id="insights"></div>
   </section>
 
@@ -154,7 +154,9 @@ const byAid = new Map(D.videos.map(v => [v.aid, v]));
 function renderHeader() {
   const s = D.summary, ser = D.series || {};
   $("kicker").textContent = `B站每周必看 · 周报 · 生成于 ${D.generated_at}`;
-  $("headline").textContent = ser.number ? `第 ${ser.number} 期：${ser.name || ""}` : "每周必看周报";
+  const dates = (ser.name || "").replace(/^\d{4}第\d+期\s*/, "");   // 期名形如「2026第391期 09.11 - 09.17」
+  $("headline").textContent = ser.number ? `第 ${ser.number} 期` + (dates ? `：${dates}` : "") : "每周必看周报";
+  $("insights-lede").textContent = `从 ${s.videos} 个视频的评论和弹幕里自动找出来的几条结论，每条都附证据。点「查看视频」看详情。`;
   $("subline").textContent = `${s.videos} 个视频 · ${fmt(s.comments)} 条一级评论（全量） · ${fmt(s.danmaku)} 条弹幕`;
   const prev = D.previous && D.previous.summary;
   const delta = (cur, old, fn) => prev ? `上期 ${fn(old)}` : "";
@@ -225,7 +227,7 @@ function renderWall() {
   const cols = [["视频", v => v.title], ["UP 主", v => v.owner], ["播放", v => fmt(v.view), 1], ["一级评论", v => fmt(v.comments), 1],
     ["楼中楼", v => fmt(v.sub_replies), 1], ["好评率", v => pct(v.positive_rate), 1], ["差评率", v => pct(v.negative_rate), 1],
     ["争议指数", v => v.controversy.toFixed(0), 1], ["弹幕", v => fmt(v.danmaku), 1], ["弹幕密度/分", v => v.danmaku_density.toFixed(0), 1],
-    ["半衰期", v => hours(v.half_life), 1], ["深夜评论", v => pct(v.late_night), 1]];
+    ["半衰期", v => hours(v.half_life), 1], ["深夜评论", v => pct(v.late_night), 1], ["复制刷屏", v => v.copies ? pct(v.copy_share) : "—", 1]];
   $("table").replaceChildren(
     h("thead", {}, h("tr", {}, cols.map(([t, , n]) => h("th", { class: n ? "n" : "" }, t)))),
     h("tbody", {}, [...D.videos].sort((a, b) => b.view - a.view).map(v =>
@@ -240,7 +242,7 @@ function renderRadar() {
     return;
   }
   const prevNo = D.previous.series && D.previous.series.number;
-  $("radar-lede").textContent = `本期评论和弹幕里，在至少 3 个视频中出现、而且比第 ${prevNo} 期明显变多的词——可能是新梗，也可能是新的热门话题（人名、事件）。只出现在单个视频里的通常是那个视频自己的话题词，不计入。`;
+  $("radar-lede").textContent = `本期评论和弹幕里，在至少 3 个视频中出现、而且比第 ${prevNo} 期明显变多的词——可能是新梗，也可能是新的热门话题（人名、事件）。只出现在单个视频里的通常是那个视频自己的话题词，不计入；复制粘贴的刷屏评论（抽奖模板等）每段只算一条。`;
   const max = Math.max(...r.rising.map(x => x.now), 1);
   const rising = h("div", { class: "card pad" }, h("h3", {}, "本周升温"),
     h("div", { class: "bars" }, r.rising.map(x => h("div", { class: "bar-row" },
@@ -353,7 +355,8 @@ function renderMethod() {
     `好评率、争议指数、评论半衰期、深夜评论等排行只统计一级评论不少于 ${D.min_comments} 条的视频，避免小样本的比例失真。`,
     "争议指数 = 负面评论占比（%）×（1 + 平均每条一级评论的楼中楼回复数）：差评多、而且吵得凶的视频数值高。",
     "「观众在说什么」取每个视频相对其他视频最有区分度的词（TF-IDF），并附一条包含该词的高赞评论。",
-    "梗雷达统计评论和弹幕的词频，要求本期出现至少 40 次、分布在至少 3 个视频中，并且频率是上一期的 3 倍以上。",
+    "梗雷达统计评论和弹幕的词频，要求分布在至少 3 个视频中、频率是上一期的 3 倍以上；每个视频对一个词最多算 30 次，避免单个视频的话题词或刷屏霸榜（显示的仍是实际次数）。视频号、链接这类编号不计入。",
+    `复制刷屏：去掉标点、空白和表情后，开头 ${D.copy_rule.chars} 个字相同（且不短于 ${D.copy_rule.min_chars} 个字）的评论视为同一段文字，在一个视频里出现至少 ${D.copy_rule.repeats} 次算刷屏（常见于抽奖模板、广告和机器号）。统计词频、关键词、表情和梗雷达时每段只算一条；评论数和情感占比仍按每条计算。`,
     "弹幕是播放器当前显示的弹幕池，少于历史弹幕总数；弹幕热度曲线按 10 秒一段统计。",
   ];
   $("method").replaceChildren(h("ul", { style: "margin:0;padding-left:18px" }, items.map(t => h("li", { style: "margin:4px 0" }, t))),
@@ -387,6 +390,8 @@ function openDetail(aid) {
           h("span", {}, h("i", { style: "background:var(--neg)" }), `负面 ${pct(v.sentiment.negative / total)}`)),
         v.top_emojis && v.top_emojis.length ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:6px" },
           "最常用表情：", v.top_emojis.map(x => `[${x.name}] ${fmt(x.count)}`).join(" · ")) : null,
+        v.copies ? h("div", { style: "color:var(--ink-2);font-size:13px;margin-top:4px" },
+          `复制刷屏：${fmt(v.copies)} 条（占一级评论 ${pct(v.copy_share)}，${v.copy_templates} 段文字），词频里每段只算一条`) : null,
         v.link ? h("div", { style: "margin-top:10px" }, h("a", { href: v.link, target: "_blank", rel: "noopener" }, "在 B站 打开 ↗")) : null)),
     h("div", { class: "block" }, h("h3", {}, "弹幕热度"),
       h("p", { class: "lede" }, "每 10 秒的弹幕数量。把鼠标移到曲线上，可以看到那一刻刷得最多的弹幕；圆点是弹幕高潮。"),
@@ -410,7 +415,9 @@ function openDetail(aid) {
         v.top_comments.length ? h("div", { class: "note", style: "margin:0" }, "点赞最高") : null,
         v.top_comments.map(quote),
         v.best_positive ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的正面评论") : null, quote(v.best_positive),
-        v.best_negative ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的负面评论") : null, quote(v.best_negative))));
+        v.best_negative ? h("div", { class: "note", style: "margin:6px 0 0" }, "最高赞的负面评论") : null, quote(v.best_negative),
+        v.copy_top ? h("div", { class: "note", style: "margin:6px 0 0" }, `被复制最多的一段（${fmt(v.copy_top.count)} 次）`) : null,
+        v.copy_top ? quote({ text: v.copy_top.text }) : null)));
   $("drawer").classList.add("open");
   document.body.style.overflow = "hidden";
   // 高潮按 6 秒窗口检测，曲线按 10 秒分段：窗口可能跨两段，标在较高的那一段上

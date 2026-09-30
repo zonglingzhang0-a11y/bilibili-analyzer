@@ -102,7 +102,8 @@ function renderIssues() {
     const s = i.summary, top = (i.top_videos || [])[0];
     const pos = s.positive_rate, neg = s.negative_rate;
     const rows = [["最受好评", find(i, "最受好评")], ["争议最大", find(i, "争议最大")],
-      ["弹幕名场面", find(i, "弹幕名场面")], ["本周热梗", find(i, "本周热梗")]].filter(([, x]) => x);
+      ["弹幕名场面", find(i, "弹幕名场面")], ["本周热梗", find(i, "本周热梗")],
+      ["复制刷屏", find(i, "复制刷屏")]].filter(([, x]) => x);
     return h("article", { class: "card issue" },
       h("div", { class: "cover", style: top && top.cover ? `background-image:url(${top.cover})` : "" },
         h("span", { class: "no" }, label(i)),

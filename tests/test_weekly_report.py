@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from datetime import datetime
 
 import weekly_report
@@ -80,6 +81,44 @@ def test_generate_writes_self_contained_html(tmp_path, monkeypatch):
     assert "{{DATA}}" not in html and "每周必看第 101 期周报" in html
     payload = html.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
     assert json.loads(payload)["previous"] is None
+
+
+def test_copy_paste_spam_counted_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(weekly_report, "COPY_INSIGHT_MIN", 10)
+    run = tmp_path / "20260908_000000"
+    run.mkdir()
+    template = "别人评论是为了交流观点，我评论只有一个观点：希望成为幸运儿"
+    # 同一段抽奖模板的几种变体（空白、表情、结尾截断不同）都应算作同一段
+    spam = [template, template + " [doge]", template.replace("，", "\n") + "🌚", template[:-1]] * 10
+    _make_video(run, 1, "视频甲", "UP甲", spam + ["这个视频真好看"] * 30 + ["正常的评论，说说我的看法"], [1, 2], ["好"])
+
+    video = weekly_report.analyze_video(str(run / "1_视频甲"), 1, "视频甲", embed_media=False)
+
+    assert video["copies"] == 40 and video["copy_templates"] == 1
+    assert video["copy_top"]["count"] == 40
+    assert video["_words"]["幸运儿"] == 1          # 40 条刷屏只算一条
+    assert video["_emojis"]["doge"] <= 1
+    assert video["_words"]["好看"] == 30           # 短评论的自然重复照常计数
+    summary = weekly_report._issue_summary([video])
+    insights = weekly_report._insights([video], summary, None, {"pairs": []})
+    assert any(item["tag"] == "复制刷屏" and item["aid"] == 1 for item in insights)
+
+
+def test_meme_radar_ignores_single_video_topics_and_ids():
+    def video(words):
+        return {"_words": Counter(words), "_danmaku_words": Counter()}
+    # 「中奖」一个视频刷了上万次、另两个视频各 1 次；「中秋」在 5 个视频里各出现 20 次
+    current = [video({"中奖": 20000, "中秋": 20, "bv1bpem6geo7": 40}), video({"中奖": 2, "中秋": 20, "bv1bpem6geo7": 40}),
+               video({"中奖": 2, "中秋": 20, "bv1bpem6geo7": 40}), video({"中秋": 20}), video({"中秋": 20})]
+    previous = [video({"普通": 500}) for _ in range(5)]
+    for v in current + previous:
+        v["_examples"] = []
+
+    radar = weekly_report._meme_radar(current, previous)
+
+    words = [x["word"] for x in radar["rising"]]
+    assert words == ["中秋"]
+    assert radar["rising"][0]["now"] == 100 and radar["rising"][0]["videos"] == 5
 
 
 def test_video_link_for_multi_part_video():

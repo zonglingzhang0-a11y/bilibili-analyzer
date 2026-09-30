@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from collections import Counter, defaultdict
@@ -21,7 +22,7 @@ from datetime import datetime
 
 from rebuild import _load_json, _series_info, _video_dirs
 from report_writer import _resolve_asset
-from stats import analyze_sentiment, extract_emojis, segment_text
+from stats import EMOJI_RE, analyze_sentiment, extract_emojis, segment_text
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_templates")
 OUTPUT_NAME = "weekly_report.html"
@@ -32,11 +33,21 @@ MIN_COMMENTS = 300          # 参与好评率、争议、寿命等排行的最�
 TIMELINE_HOURS = 168        # 评论走势显示发布后 7 天
 KEYWORDS_PER_VIDEO = 6
 EXAMPLE_POOL = 3000         # 每个视频保留点赞最高的若干条评论，用于给关键词找例句
-MEME_MIN_COUNT = 40         # 梗雷达：本期至少出现的次数
+MEME_MIN_COUNT = 60         # 梗雷达：本期至少出现的次数（按每个视频截顶后的次数计）
 MEME_MIN_VIDEOS = 3         # 梗雷达：至少在几个视频里出现（区分跨视频流行的梗和单个视频的话题词）
+MEME_VIDEO_CAP = 30         # 梗雷达：每个视频对一个词最多贡献这么多次，免得单个视频的话题词霸榜
+MEME_NOISE_RE = re.compile(r"(?:bv|av)[0-9a-z]{6,}|(?=[a-z]*\d)[a-z0-9]{10,}")  # 视频号、链接片段等
 OVERLAP_MIN_SHARED = 30     # 观众重合：至少共同观众人数
 LATE_NIGHT_HOURS = range(0, 6)
 MIN_COMPARE_COMPLETION = 0.9  # 作为对比对象的期，完成视频数至少占计划的比例
+# 复制刷屏：去掉标点、空白和表情后，开头 COPY_KEY_CHARS 个字相同的评论视为同一段文字；
+# 在一个视频里出现至少 COPY_MIN_REPEATS 次算刷屏（抽奖模板、广告、机器号），词频和表情只按一条算。
+# 短于 COPY_MIN_CHARS 的（「前排」「哈哈哈」）是自然重复，不算
+COPY_KEY_CHARS = 24
+COPY_MIN_CHARS = 12
+COPY_MIN_REPEATS = 20
+COPY_INSIGHT_MIN = 200        # 看点里的「复制刷屏」：至少这么多条刷屏评论
+COPY_INSIGHT_SHARE = 0.05     # 且占该视频一级评论的比例至少这么多
 
 
 # ── 小工具 ────────────────────────────────────────────
@@ -94,6 +105,19 @@ def _video_link(bvid: str, pages: list[dict], second: int | None = None) -> str 
                 return f"{url}?p={index}&t={max(0, second - offset)}"
             offset += duration
     return f"{url}?t={second}"
+
+
+def _copy_key(text: str) -> str | None:
+    """判断复制刷屏用的文字指纹：只保留文字和数字，取开头若干字；太短的返回 None"""
+    text = "".join(ch for ch in EMOJI_RE.sub("", text or "").lower() if ch.isalnum())
+    return text[:COPY_KEY_CHARS] if len(text) >= COPY_MIN_CHARS else None
+
+
+def _copy_templates(comments: list[dict]) -> tuple[list[str | None], dict[str, int]]:
+    """每条评论的指纹，以及刷屏模板 {指纹: 条数}"""
+    keys = [_copy_key(c.get("content", "")) for c in comments]
+    counts = Counter(k for k in keys if k)
+    return keys, {k: n for k, n in counts.items() if n >= COPY_MIN_REPEATS}
 
 
 def _best_comment(comments: list[dict], labels: list[str], wanted: str | None = None,
@@ -174,10 +198,23 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
             "link": _video_link(bvid, pages, second),
         })
 
+    # 词频和表情：同一段刷屏文字只算一条，免得一个抽奖模板就把梗雷达和关键词带偏
+    keys, templates = _copy_templates(comments)
     words, emojis = Counter(), Counter()
-    for comment in comments:
+    counted = set()
+    for comment, key in zip(comments, keys):
+        if key in templates:
+            if key in counted:
+                continue
+            counted.add(key)
         words.update(segment_text(comment.get("content", "")))
         emojis.update(extract_emojis(comment.get("content", "")))
+    copies = sum(templates.values())
+    copy_top = None
+    if templates:
+        top_key = max(templates, key=templates.get)
+        sample = max((c for c, k in zip(comments, keys) if k == top_key), key=lambda c: c.get("like", 0))
+        copy_top = {"text": _clip(sample.get("content", ""), 140), "count": templates[top_key]}
     danmaku_words = Counter()
     for item in danmaku:
         danmaku_words.update(segment_text(item.get("content", "")))
@@ -220,6 +257,10 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
         "best_negative": _best_comment(comments, labels, "negative", set(ranked[:3])),
         "keywords": [],
         "top_emojis": [{"name": name, "count": count} for name, count in emojis.most_common(5)],
+        "copies": copies,
+        "copy_share": copies / count if count else 0,
+        "copy_templates": len(templates),
+        "copy_top": copy_top,
         # 以下供全期汇总使用，不写入网页
         "_emojis": emojis,
         "_words": words,
@@ -272,44 +313,53 @@ def _assign_keywords(videos: list[dict]):
                                       "example": example})
 
 
-def _issue_words(videos: list[dict]) -> tuple[Counter, Counter]:
-    """全期词频（评论+弹幕）以及每个词出现在几个视频里"""
-    totals, spread = Counter(), Counter()
+def _issue_words(videos: list[dict]) -> tuple[Counter, Counter, Counter]:
+    """全期词频（评论+弹幕）：实际次数、每个视频截顶后的次数、出现在几个视频里"""
+    totals, capped, spread = Counter(), Counter(), Counter()
     for video in videos:
         merged = video["_words"] + video["_danmaku_words"]
         totals.update(merged)
-        spread.update(w for w, c in merged.items() if c >= 2)
-    return totals, spread
+        for word, count in merged.items():
+            capped[word] += min(count, MEME_VIDEO_CAP)
+            if count >= 2:
+                spread[word] += 1
+    return totals, capped, spread
+
+
+def _is_meme_candidate(word: str, capped: int, spread: int) -> bool:
+    return (capped >= MEME_MIN_COUNT and spread >= MEME_MIN_VIDEOS and not word.isdigit()
+            and not MEME_NOISE_RE.fullmatch(word))
 
 
 def _meme_radar(current: list[dict], previous: list[dict] | None) -> dict | None:
-    """梗雷达：跨多个视频流行、而且比上一期明显变多的词；以及上期流行、本期降温的词"""
+    """梗雷达：跨多个视频流行、而且比上一期明显变多的词；以及上期流行、本期降温的词。
+    排序和门槛用每个视频截顶后的次数（一个视频刷几万次也只算 MEME_VIDEO_CAP 次），展示实际次数"""
     if not previous:
         return None
-    now, now_spread = _issue_words(current)
-    before, before_spread = _issue_words(previous)
-    now_total, before_total = sum(now.values()) or 1, sum(before.values()) or 1
+    now, now_capped, now_spread = _issue_words(current)
+    before, before_capped, before_spread = _issue_words(previous)
+    now_total, before_total = sum(now_capped.values()) or 1, sum(before_capped.values()) or 1
 
     def rate(counter, total, word):
         return counter.get(word, 0) / total * 100_000
 
     rising = []
-    for word, count in now.items():
-        if count < MEME_MIN_COUNT or now_spread[word] < MEME_MIN_VIDEOS or word.isdigit():
+    for word, capped in now_capped.items():
+        if not _is_meme_candidate(word, capped, now_spread[word]):
             continue
-        lift = (rate(now, now_total, word) + 1) / (rate(before, before_total, word) + 1)
+        lift = (rate(now_capped, now_total, word) + 1) / (rate(before_capped, before_total, word) + 1)
         if lift >= 3:
-            rising.append((lift * math.log(count), word, count, before.get(word, 0),
+            rising.append((lift * math.log(capped), word, now[word], before.get(word, 0),
                            now_spread[word], lift))
     rising.sort(reverse=True)
 
     fading = []
-    for word, count in before.items():
-        if count < MEME_MIN_COUNT or before_spread[word] < MEME_MIN_VIDEOS or word.isdigit():
+    for word, capped in before_capped.items():
+        if not _is_meme_candidate(word, capped, before_spread[word]):
             continue
-        drop = (rate(before, before_total, word) + 1) / (rate(now, now_total, word) + 1)
+        drop = (rate(before_capped, before_total, word) + 1) / (rate(now_capped, now_total, word) + 1)
         if drop >= 3:
-            fading.append((drop * math.log(count), word, count, now.get(word, 0), drop))
+            fading.append((drop * math.log(capped), word, before[word], now.get(word, 0), drop))
     fading.sort(reverse=True)
 
     used_examples: set[str] = set()
@@ -389,6 +439,7 @@ def _issue_summary(videos: list[dict]) -> dict:
         "positive_rate": sentiment["positive"] / comments if comments else 0,
         "negative_rate": sentiment["negative"] / comments if comments else 0,
         "late_night": sum(hour_share[h] for h in LATE_NIGHT_HOURS),
+        "copy_share": sum(v["copies"] for v in videos) / comments if comments else 0,
         "median_half_life": statistics.median(half_lives) if half_lives else None,
         "hour_share": hour_share,
     }
@@ -446,6 +497,15 @@ def _insights(videos: list[dict], summary: dict, radar: dict | None, overlap: di
             "tag": "本周热梗", "word": top["word"], "value": f"{top['now']:,} 次",
             "text": f"「{top['word']}」在 {top['videos']} 个视频的评论和弹幕里出现了 {top['now']:,} 次，{before}。",
             "quote": {"text": top["example"]} if top["example"] else None,
+        })
+    spam = max(videos, key=lambda v: v["copies"], default=None)
+    if spam and spam["copies"] >= COPY_INSIGHT_MIN and spam["copy_share"] >= COPY_INSIGHT_SHARE:
+        top = spam["copy_top"]
+        items.append({
+            "tag": "复制刷屏", "aid": spam["aid"], "value": f"{spam['copies']:,} 条",
+            "text": f"{spam['copy_share']:.1%} 的一级评论是在复制粘贴同样的文字（{spam['copy_templates']} 段），"
+                    f"最多的一段被发了 {top['count']:,} 次。统计词频、表情和梗雷达时，同一段文字只算一条。",
+            "quote": {"text": top["text"]},
         })
     if overlap["pairs"]:
         pair = overlap["pairs"][0]
@@ -546,6 +606,7 @@ def build_report_data(run_dir: str, compare_dir: str | None = None) -> dict:
         "overlap": overlap,
         "regulars": regulars,
         "min_comments": MIN_COMMENTS,
+        "copy_rule": {"chars": COPY_KEY_CHARS, "min_chars": COPY_MIN_CHARS, "repeats": COPY_MIN_REPEATS},
     }
 
 
