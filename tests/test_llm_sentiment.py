@@ -86,6 +86,47 @@ def test_annotate_stops_on_fatal_error_and_keeps_progress(tmp_path, monkeypatch)
     assert sorted(done) == [0, 10]
 
 
+def test_other_models_use_separate_label_files(tmp_path):
+    llm_sentiment.save_labels(str(tmp_path), {"1": "正1"}, "deepseek-chat")
+    llm_sentiment.save_labels(str(tmp_path), {"1": "负2"}, "cn:deepseek-v4-flash")
+    assert (tmp_path / "llm_sentiment.json").exists()
+    assert (tmp_path / "llm_sentiment.cn_deepseek-v4-flash.json").exists()
+    assert llm_sentiment.load_labels(str(tmp_path)) == {"1": "正1"}
+    assert llm_sentiment.load_labels(str(tmp_path), "cn:deepseek-v4-flash") == {"1": "负2"}
+
+
+def test_proxy_run_stops_at_credit_limit(tmp_path, monkeypatch):
+    run = tmp_path / "20260908_000000"
+    _make_video(run, 1, [f"第{i}条评论" for i in range(50)])
+    monkeypatch.setattr(llm_sentiment, "BATCH_SIZE", 10)
+    monkeypatch.setattr(llm_sentiment, "API_BASE", "http://127.0.0.1:7863/v1")
+
+    def api(client, key, model, texts):
+        labels = {str(i): "中4" for i in range(len(texts))}
+        return json.dumps({"labels": labels}), {"prompt_tokens": 10, "completion_tokens": 5, "credit": 0.5}
+    monkeypatch.setattr(llm_sentiment, "_post_chat", api)
+
+    usage = llm_sentiment.annotate_run(str(run), "k", sample=None, model="m", max_credit=1.0, workers=1)
+
+    assert usage.requests == 2 and usage.credit == pytest.approx(1.0)
+
+
+def test_report_uses_model_with_most_labels(tmp_path):
+    run = tmp_path / "20260908_000000"
+    a = _make_video(run, 1, ["好看"] * 10)
+    b = _make_video(run, 2, ["一般"] * 10)
+    for d in (a, b):
+        (d / "stats.json").write_text("{}", encoding="utf-8")
+    llm_sentiment.save_labels(str(a), {"1000": "正1"}, "deepseek-chat")
+    llm_sentiment.save_labels(str(a), {str(1000 + i): "负2" for i in range(10)}, "m+think")
+    llm_sentiment.save_labels(str(b), {str(2000 + i): "中4" for i in range(10)}, "m+think")
+    (run / "resume_state.json").write_text(json.dumps({"series_number": 101, "videos": {}}), encoding="utf-8")
+
+    assert weekly_report._pick_llm_tag(str(run)) == "m+think"
+    data = weekly_report.build_report_data(str(run))
+    assert data["llm"]["model"] == "m+think" and data["llm"]["sampled"] == 20
+
+
 def test_clean_key_strips_paste_artifacts():
     assert llm_sentiment.clean_key("\x1b[200~sk-abc123\x1b[201~\r\n") == "sk-abc123"
     assert llm_sentiment.clean_key("﻿ sk-abc\x16 ") == "sk-abc"

@@ -20,7 +20,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 
-from llm_sentiment import decode as decode_llm_label, read_label_file
+from llm_sentiment import available_tags, decode as decode_llm_label, read_label_file
 from rebuild import _load_json, _series_info, _video_dirs
 from report_writer import _resolve_asset
 from stats import EMOJI_RE, analyze_sentiment, extract_emojis, segment_text
@@ -124,9 +124,18 @@ def _copy_templates(comments: list[dict]) -> tuple[list[str | None], dict[str, i
 SENTIMENTS = ("positive", "neutral", "negative")
 
 
-def _llm_view(video_dir: str, comments: list[dict], dict_labels: list[str]) -> dict | None:
+def _pick_llm_tag(run_dir: str) -> str | None:
+    """一期里标注条数最多的模型；整期统一用它，不在视频之间混用不同模型的结果"""
+    totals = Counter()
+    for _, entry, _ in _video_dirs(run_dir):
+        totals.update(available_tags(os.path.join(run_dir, entry)))
+    return totals.most_common(1)[0][0] if totals else None
+
+
+def _llm_view(video_dir: str, comments: list[dict], dict_labels: list[str],
+              tag: str | None = None) -> dict | None:
     """大模型标注（抽样或全量，见 llm_sentiment.py）的统计，并和同一批评论的词典判断对比；没有标注时返回 None"""
-    data = read_label_file(video_dir)
+    data = read_label_file(video_dir, tag) if tag else None
     if not data:
         return None
     stored = data["labels"]
@@ -178,7 +187,8 @@ def _best_comment(comments: list[dict], labels: list[str], wanted: str | None = 
 
 # ── 单个视频 ──────────────────────────────────────────
 
-def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) -> dict:
+def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool,
+                  llm_tag: str | None = None) -> dict:
     """计算单个视频的展示数据，同时返回供全期汇总的中间结果（以 _ 开头的键）"""
     stats = _load_json(os.path.join(video_dir, "stats.json"), {})
     comments = _load_json(os.path.join(video_dir, "comments.json"), [])
@@ -191,7 +201,7 @@ def analyze_video(video_dir: str, aid: int, title_hint: str, embed_media: bool) 
 
     labels = [analyze_sentiment(c.get("content", "")) for c in comments]
     sentiment = Counter(labels)
-    llm = _llm_view(video_dir, comments, labels)
+    llm = _llm_view(video_dir, comments, labels, llm_tag)
     count = len(comments)
     sub_replies = sum(c.get("rcount", 0) for c in comments)
     positive_rate = sentiment["positive"] / count if count else 0
@@ -626,9 +636,10 @@ def analyze_run(run_dir: str, embed_media: bool = True) -> dict:
     state = _load_json(os.path.join(run_dir, "resume_state.json"), {})
     meta = state.get("videos", {})
     videos = []
+    llm_tag = _pick_llm_tag(run_dir)
     for aid, entry, dir_title in _video_dirs(run_dir):
         title = meta.get(str(aid), {}).get("title") or dir_title
-        videos.append(analyze_video(os.path.join(run_dir, entry), aid, title, embed_media))
+        videos.append(analyze_video(os.path.join(run_dir, entry), aid, title, embed_media, llm_tag))
     _assign_keywords(videos)
     summary = _issue_summary(videos)
     llm = _llm_summary(videos)

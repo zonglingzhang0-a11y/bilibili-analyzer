@@ -8,9 +8,12 @@
     python llm_sentiment.py bilibili_output/20260928_192613 --sample 1000
     python llm_sentiment.py bilibili_output/20260928_192613 --full --max-cost 50
     python llm_sentiment.py --all                      # 输出目录下所有期
+    python llm_sentiment.py RUN_DIR --api-base http://127.0.0.1:7863/v1 --model cn:deepseek-v4-flash --max-credit 100
+                                                       # 其他 OpenAI 兼容接口（如本机反代），按额度设上限
 
 也可以用环境变量 DEEPSEEK_API_KEY 提供 key（优先于 .deepseek_key）。
-结果按评论 rpid 缓存在每个视频目录的 llm_sentiment.json，重复运行只补没标过的，中断后可接着跑；
+结果按评论 rpid 缓存在每个视频目录的 llm_sentiment.json（其他模型为 llm_sentiment.<模型名>.json），
+重复运行只补没标过的，中断后可接着跑；
 抽样按 rpid 的哈希排序取前 N 条，加大 N 时原来的样本保留、只补新增的。
 只发送评论正文，不发送用户名、UID 等信息。完成后重新生成周报即可看到对比。
 """
@@ -29,15 +32,17 @@ from dataclasses import dataclass, field
 
 import httpx
 
-API_BASE = "https://api.deepseek.com"
+OFFICIAL_BASE = "https://api.deepseek.com"
+API_BASE = OFFICIAL_BASE      # 可用 --api-base 改成其他 OpenAI 兼容接口
 DEFAULT_MODEL = "deepseek-chat"
 KEY_ENV = "DEEPSEEK_API_KEY"
 DEFAULT_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deepseek_key")
-LABEL_FILE = "llm_sentiment.json"
+LABEL_FILE = "llm_sentiment.json"   # 默认模型的标注文件；其他模型见 label_file()
 PROMPT_VERSION = 1            # 提示词或类别改动时加 1，旧的标注会重新做
 
 DEFAULT_SAMPLE = 300          # 每个视频默认抽样条数
-BATCH_SIZE = 40               # 每次请求的评论条数
+BATCH_SIZE = 40               # 每次请求的评论条数（--batch-size 可改）
+EXTRA_PAYLOAD: dict = {}      # 附加到请求里的参数（--no-thinking 时关闭模型的思考过程）
 MAX_CHARS = 300               # 单条评论最多发送的字数
 WORKERS = 8                   # 并发请求数
 MAX_RETRIES = 5
@@ -139,6 +144,15 @@ def check_key(key: str) -> dict:
     return resp.json()
 
 
+def list_models(key: str) -> list[str]:
+    """OpenAI 兼容接口的模型列表，同时验证 key"""
+    resp = httpx.get(f"{API_BASE}/models", headers={"Authorization": f"Bearer {key}"}, timeout=20)
+    if resp.status_code == 401:
+        raise LLMError("API key 无效（401）")
+    resp.raise_for_status()
+    return [m.get("id") for m in resp.json().get("data", []) if isinstance(m, dict)]
+
+
 # ── 请求与解析 ──────────────────────────────────────────
 
 @dataclass
@@ -147,6 +161,7 @@ class Usage:
     miss: int = 0
     output: int = 0
     requests: int = 0
+    credit: float = 0.0       # 部分代理接口在 usage 里返回的额度消耗
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, usage: dict):
@@ -155,6 +170,7 @@ class Usage:
             self.hit += hit
             self.miss += usage.get("prompt_cache_miss_tokens", usage.get("prompt_tokens", 0) - hit)
             self.output += usage.get("completion_tokens", 0)
+            self.credit += usage.get("credit") or 0
             self.requests += 1
 
     @property
@@ -173,6 +189,7 @@ def _post_chat(client: httpx.Client, key: str, model: str, texts: list[str]) -> 
         "model": model,
         "temperature": 0,
         "response_format": {"type": "json_object"},
+        **EXTRA_PAYLOAD,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps({str(i): t for i, t in enumerate(texts)}, ensure_ascii=False)},
@@ -241,10 +258,17 @@ def label_texts(client: httpx.Client, key: str, model: str, texts: list[str], us
 
 # ── 标注结果缓存 ────────────────────────────────────────
 
+def label_file(model: str = DEFAULT_MODEL) -> str:
+    """每个模型的标注分开存，换模型试跑不会覆盖已有结果"""
+    if model == DEFAULT_MODEL:
+        return LABEL_FILE
+    return f"llm_sentiment.{re.sub(r'[^0-9A-Za-z._-]+', '_', model)}.json"
+
+
 def load_labels(video_dir: str, model: str = DEFAULT_MODEL) -> dict[str, str]:
-    """{rpid: 标签}；模型或提示词版本不同的旧结果不用"""
+    """{rpid: 标签}；提示词版本不同的旧结果不用"""
     try:
-        with open(os.path.join(video_dir, LABEL_FILE), encoding="utf-8") as f:
+        with open(os.path.join(video_dir, label_file(model)), encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -254,21 +278,40 @@ def load_labels(video_dir: str, model: str = DEFAULT_MODEL) -> dict[str, str]:
 
 
 def save_labels(video_dir: str, labels: dict[str, str], model: str):
-    path = os.path.join(video_dir, LABEL_FILE)
+    path = os.path.join(video_dir, label_file(model))
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"model": model, "prompt_version": PROMPT_VERSION, "labels": labels}, f, ensure_ascii=False)
     os.replace(tmp, path)
 
 
-def read_label_file(video_dir: str) -> dict | None:
-    """周报用：读取标注文件（不校验模型），没有时返回 None"""
+def read_label_file(video_dir: str, model: str = DEFAULT_MODEL) -> dict | None:
+    """周报用：读取某个模型的标注文件，没有时返回 None"""
     try:
-        with open(os.path.join(video_dir, LABEL_FILE), encoding="utf-8") as f:
+        with open(os.path.join(video_dir, label_file(model)), encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
     return data if data.get("labels") else None
+
+
+def available_tags(video_dir: str) -> dict[str, int]:
+    """视频目录里各模型（含参数变体）的标注条数"""
+    result = {}
+    try:
+        names = os.listdir(video_dir)
+    except OSError:
+        return result
+    for name in names:
+        if name.startswith("llm_sentiment") and name.endswith(".json"):
+            try:
+                with open(os.path.join(video_dir, name), encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("model") and data.get("prompt_version") == PROMPT_VERSION:
+                result[data["model"]] = len(data.get("labels", {}))
+    return result
 
 
 def decode(label: str) -> tuple[str, str]:
@@ -314,8 +357,14 @@ def estimate_cost(chars: int, texts: int) -> float:
 
 
 def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE, model: str = DEFAULT_MODEL,
-                 max_cost: float = DEFAULT_MAX_COST, workers: int = WORKERS) -> Usage:
-    """标注一个运行目录下所有视频的评论，返回用量"""
+                 max_cost: float = DEFAULT_MAX_COST, max_credit: float | None = None,
+                 workers: int = WORKERS, tag: str | None = None, batch_size: int | None = None) -> Usage:
+    """标注一个运行目录下所有视频的评论，返回用量。
+    官方接口按估算的元数设上限；其他接口的 token 单价未知，只按 max_credit（接口返回的额度）设上限。
+    tag 是标注结果的存储名（默认同模型名），同一模型换了参数（如关闭思考）时用不同的 tag 分开存"""
+    official = API_BASE.rstrip("/") == OFFICIAL_BASE
+    store = tag or model
+    batch_size = batch_size or BATCH_SIZE
     jobs, batches = [], []
     for video_dir, title in _video_dirs(run_dir):
         try:
@@ -323,7 +372,7 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
                 comments = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-        labels = load_labels(video_dir, model)
+        labels = load_labels(video_dir, store)
         groups: dict[str, list[str]] = {}
         for comment in select_comments(comments, sample):
             rpid = str(comment["rpid"])
@@ -340,8 +389,8 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
                 labels[rpid] = known[text]
         job = _VideoJob(video_dir, title, labels, groups)
         texts = list(groups)
-        for start in range(0, len(texts), BATCH_SIZE):
-            batches.append((job, texts[start:start + BATCH_SIZE]))
+        for start in range(0, len(texts), batch_size):
+            batches.append((job, texts[start:start + batch_size]))
             job.pending += 1
         jobs.append(job)
 
@@ -352,10 +401,11 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
         print(f"✅ {name}: 没有需要标注的评论（已全部标注过）")
         for job in jobs:
             if job.labels:
-                save_labels(job.video_dir, job.labels, model)
+                save_labels(job.video_dir, job.labels, store)
         return Usage()
-    print(f"🤖 {name}: {len(jobs)} 个视频，待标注 {texts_total:,} 段文字（{len(batches)} 次请求），"
-          f"预计约 ¥{estimate_cost(chars_total, texts_total):.2f}，上限 ¥{max_cost:.2f}")
+    budget = (f"预计约 ¥{estimate_cost(chars_total, texts_total):.2f}，上限 ¥{max_cost:.2f}" if official
+              else f"接口 {API_BASE}，模型 {model}" + (f"，额度上限 {max_credit:g}" if max_credit else ""))
+    print(f"🤖 {name}: {len(jobs)} 个视频，待标注 {texts_total:,} 段文字（{len(batches)} 次请求），{budget}")
 
     usage = Usage()
     done_texts = done_batches = 0
@@ -393,13 +443,20 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
                     done_batches += 1
                     job.pending -= 1
                     if job.pending == 0:
-                        save_labels(job.video_dir, job.labels, model)
+                        save_labels(job.video_dir, job.labels, store)
                         print(f"  ✓ {job.title[:30]}  已标注 {len(job.labels):,} 条")
                     if done_batches % 50 == 0:
-                        print(f"  … {done_texts:,}/{texts_total:,} 段，已花费约 ¥{usage.cost:.2f}，"
+                        for other in jobs:
+                            if other.pending and other.labels:
+                                save_labels(other.video_dir, other.labels, store)
+                        spent = f"已花费约 ¥{usage.cost:.2f}" if official else f"已用额度 {usage.credit:.2f}"
+                        print(f"  … {done_texts:,}/{texts_total:,} 段，{spent}，"
                               f"用时 {(time.time() - started) / 60:.1f} 分钟")
-                if usage.cost >= max_cost and queue:
+                if official and usage.cost >= max_cost and queue:
                     stop_reason = f"已达到花费上限 ¥{max_cost:.2f}"
+                    queue.clear()
+                if max_credit and usage.credit >= max_credit and queue:
+                    stop_reason = f"已达到额度上限 {max_credit:g}"
                     queue.clear()
                 while queue and len(running) < workers:
                     submit()
@@ -413,9 +470,11 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
             # 无论正常结束还是中断，都把已完成的标注写盘
             for job in jobs:
                 if job.labels:
-                    save_labels(job.video_dir, job.labels, model)
+                    save_labels(job.video_dir, job.labels, store)
+            spent = f"约 ¥{usage.cost:.2f}" if official else f"额度 {usage.credit:.2f}"
             print(f"📊 {name}: 请求 {usage.requests} 次，输入 {usage.hit + usage.miss:,} tokens"
-                  f"（缓存命中 {usage.hit:,}），输出 {usage.output:,} tokens，约 ¥{usage.cost:.2f}")
+                  f"（缓存命中 {usage.hit:,}），输出 {usage.output:,} tokens，{spent}，"
+                  f"用时 {(time.time() - started) / 60:.1f} 分钟")
             if stop_reason:
                 print(f"⏸ 已停止：{stop_reason}。重新运行同样的命令会接着标注。")
     return usage
@@ -433,6 +492,16 @@ def main():
     parser.add_argument("--max-cost", type=float, default=DEFAULT_MAX_COST,
                         help=f"本次运行的花费上限，单位元（默认 {DEFAULT_MAX_COST:g}）")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"模型名（默认 {DEFAULT_MODEL}）")
+    parser.add_argument("--api-base", default=None,
+                        help=f"OpenAI 兼容接口地址（默认 DeepSeek 官方 {OFFICIAL_BASE}，如本机反代 http://127.0.0.1:7863/v1）")
+    parser.add_argument("--max-credit", type=float, default=None,
+                        help="按接口返回的额度设上限（用于返回 credit 的代理接口）")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help=f"每次请求的评论条数（默认 {BATCH_SIZE}）")
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="关闭模型的思考过程（支持 thinking 参数的模型，速度快约 3 倍、额度省约 3 倍）；"
+                             "结果单独存放，不和开启思考时的标注混在一起")
+    parser.add_argument("--thinking", action="store_true",
+                        help="强制开启模型的思考过程（更准、更慢、额度更多）；结果单独存放")
     parser.add_argument("--workers", type=int, default=WORKERS, help=f"并发请求数（默认 {WORKERS}）")
     parser.add_argument("--no-report", action="store_true", help="标注完不重新生成周报")
     parser.add_argument("--set-key", action="store_true", help="输入并保存 DeepSeek API key（输入时不显示）")
@@ -458,17 +527,35 @@ def main():
         print(f"✅ 已保存到 {DEFAULT_KEY_FILE}（{len(value)} 个字符）")
         args.check = True
 
+    global API_BASE
+    if args.api_base:
+        API_BASE = args.api_base.rstrip("/")
+    if args.thinking and args.no_thinking:
+        parser.error("--thinking 和 --no-thinking 不能同时使用")
+    tag = args.model
+    if args.no_thinking:
+        EXTRA_PAYLOAD["thinking"] = {"type": "disabled"}
+        tag += "+nothink"
+    if args.thinking:
+        EXTRA_PAYLOAD["thinking"] = {"type": "enabled"}
+        tag += "+think"
     key = load_key()
     if not key:
         parser.error(f"没有找到 API key：请运行 python llm_sentiment.py --set-key，或设置环境变量 {KEY_ENV}")
     if args.check:
         try:
-            info = check_key(key)
+            if API_BASE == OFFICIAL_BASE:
+                info = check_key(key)
+                balances = "，".join(f"{b.get('currency')} {b.get('total_balance')}"
+                                    for b in info.get("balance_infos", []))
+                print(f"✅ key 可用，余额：{balances or '未知'}")
+            else:
+                models = list_models(key)
+                found = "，包含" if args.model in models else "，⚠️ 不包含"
+                print(f"✅ 接口可用，共 {len(models)} 个模型{found} {args.model}")
         except (LLMError, httpx.HTTPError) as e:
             print(f"❌ {e}")
             sys.exit(1)
-        balances = "，".join(f"{b.get('currency')} {b.get('total_balance')}" for b in info.get("balance_infos", []))
-        print(f"✅ key 可用，余额：{balances or '未知'}")
         if not (args.run_dir or args.all):
             return
 
@@ -480,17 +567,21 @@ def main():
     else:
         parser.error("请指定运行目录，或使用 --all")
 
-    budget = args.max_cost
+    budget, credit = args.max_cost, args.max_credit
     sample = None if args.full else args.sample
     for run in runs:
         try:
-            usage = annotate_run(run, key, sample=sample, model=args.model, max_cost=budget, workers=args.workers)
+            usage = annotate_run(run, key, sample=sample, model=args.model, max_cost=budget,
+                                 max_credit=credit, workers=args.workers, tag=tag, batch_size=args.batch_size)
         except LLMError as e:
             print(f"❌ {e}")
             sys.exit(1)
-        budget -= usage.cost
-        if budget <= 0:
-            print("已用完本次花费上限，后面的期没有标注")
+        if API_BASE == OFFICIAL_BASE:
+            budget -= usage.cost
+        if credit:
+            credit -= usage.credit
+        if (API_BASE == OFFICIAL_BASE and budget <= 0) or (credit is not None and credit <= 0):
+            print("已用完本次上限，后面的期没有标注")
             break
 
     if not args.no_report:
