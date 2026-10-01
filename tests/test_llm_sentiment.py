@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 import llm_sentiment
@@ -80,10 +81,31 @@ def test_annotate_stops_on_fatal_error_and_keeps_progress(tmp_path, monkeypatch)
     monkeypatch.setattr(llm_sentiment, "BATCH_SIZE", 10)
     monkeypatch.setattr(llm_sentiment, "_post_chat", FakeAPI(error_after=1))
 
-    llm_sentiment.annotate_run(str(run), "k", sample=None, workers=1)
+    with pytest.raises(llm_sentiment.LLMError):
+        llm_sentiment.annotate_run(str(run), "k", sample=None, workers=1)
 
     done = [len(llm_sentiment.load_labels(str(d))) for d in sorted(run.iterdir())]
     assert sorted(done) == [0, 10]
+
+
+def test_annotate_pauses_after_consecutive_failures(tmp_path, monkeypatch):
+    run = tmp_path / "20260908_000000"
+    video_dir = _make_video(run, 1, [f"第{i}条评论" for i in range(100)])
+    monkeypatch.setattr(llm_sentiment, "BATCH_SIZE", 10)
+    calls = []
+
+    def api(client, key, model, texts):
+        calls.append(1)
+        if len(calls) > 2:
+            raise httpx.ReadTimeout("timed out")
+        return json.dumps({"labels": {str(i): "中4" for i in range(len(texts))}}), {}
+    monkeypatch.setattr(llm_sentiment, "_post_chat", api)
+
+    with pytest.raises(llm_sentiment.LLMError, match="连续"):
+        llm_sentiment.annotate_run(str(run), "k", sample=None, workers=1)
+
+    assert len(calls) == 2 + llm_sentiment.MAX_FAILED_IN_ROW            # 不会把剩下的批次全部白等一遍
+    assert len(llm_sentiment.load_labels(str(video_dir))) == 20         # 成功的部分已存盘
 
 
 def test_other_models_use_separate_label_files(tmp_path):

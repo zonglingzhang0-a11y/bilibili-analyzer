@@ -46,6 +46,7 @@ EXTRA_PAYLOAD: dict = {}      # 附加到请求里的参数（--no-thinking 时�
 MAX_CHARS = 300               # 单条评论最多发送的字数
 WORKERS = 8                   # 并发请求数
 MAX_RETRIES = 5
+MAX_FAILED_IN_ROW = 6         # 连续这么多批失败（重试用尽）就暂停整次运行
 DEFAULT_MAX_COST = 20.0       # 单次运行的花费上限（元）
 
 # DeepSeek 官网价格（元 / 百万 tokens），价格调整时改这里；只用于估算花费和 --max-cost 上限
@@ -408,9 +409,9 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
     print(f"🤖 {name}: {len(jobs)} 个视频，待标注 {texts_total:,} 段文字（{len(batches)} 次请求），{budget}")
 
     usage = Usage()
-    done_texts = done_batches = 0
+    done_texts = done_batches = failed_in_row = 0
     started = time.time()
-    stop_reason = None
+    stop_reason = fatal = None
     with httpx.Client(limits=httpx.Limits(max_connections=workers)) as client, \
             ThreadPoolExecutor(max_workers=workers) as pool:
         queue = list(batches)
@@ -429,13 +430,19 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
                     job, texts = running.pop(future)
                     try:
                         result = future.result()
+                        failed_in_row = 0
                     except LLMError as e:
-                        stop_reason = str(e)
+                        stop_reason = fatal = str(e)
                         queue.clear()
                         continue
                     except Exception as e:
                         print(f"    ⚠️ 一批 {len(texts)} 条标注失败（{type(e).__name__}: {e}），下次运行会重试")
                         result = {}
+                        failed_in_row += 1
+                        if failed_in_row >= MAX_FAILED_IN_ROW and queue:
+                            # 接口持续不可用时继续发只会白等，先停下，恢复后重新运行即可接着标
+                            stop_reason = fatal = f"接口连续 {failed_in_row} 批失败，暂停标注"
+                            queue.clear()
                     for index, label in result.items():
                         for rpid in job.groups[texts[index]]:
                             job.labels[rpid] = label
@@ -477,6 +484,8 @@ def annotate_run(run_dir: str, key: str, *, sample: int | None = DEFAULT_SAMPLE,
                   f"用时 {(time.time() - started) / 60:.1f} 分钟")
             if stop_reason:
                 print(f"⏸ 已停止：{stop_reason}。重新运行同样的命令会接着标注。")
+    if fatal:
+        raise LLMError(fatal)
     return usage
 
 
