@@ -506,6 +506,15 @@ LLM_EXAMPLE_KINDS = [("neutral", "negative"), ("neutral", "positive"), ("positiv
                      ("negative", "positive"), ("positive", "neutral"), ("negative", "neutral")]
 
 
+def _llm_model_label(tag: str) -> str:
+    """标注存储名转成展示用的名字：cn:deepseek-v4.1-flash+think → DeepSeek v4.1-flash（开思考）"""
+    name, _, variant = tag.partition("+")
+    name = name.split(":", 1)[-1]
+    if name.startswith("deepseek-"):
+        name = "DeepSeek " + name[len("deepseek-"):]
+    return name + {"think": "（开思考）", "nothink": "（关思考）"}.get(variant, "")
+
+
 def _llm_summary(videos: list[dict]) -> dict | None:
     """全期的大模型情感：各视频的样本比例按该视频评论数加权，推算到全部评论；并汇总与词典判断的对比"""
     labeled = [v for v in videos if v["llm"]]
@@ -530,6 +539,7 @@ def _llm_summary(videos: list[dict]) -> dict | None:
                 for item in sorted(by_kind.get(kind, []), key=lambda d: -d["like"])[:3]]
     return {
         "model": labeled[0]["llm"]["model"],
+        "model_label": _llm_model_label(labeled[0]["llm"]["model"]),
         "videos": len(labeled),
         "sampled": sampled,
         "full": all(v["llm"]["coverage"] >= 0.99 for v in labeled),

@@ -150,8 +150,8 @@ function renderTrends() {
     ["凌晨评论占比", "late_night", v => pct(v), "0～6 点发出的评论比例"],
   ];
   if (done.every(i => i.summary.llm_positive_rate != null)) {
-    charts.splice(5, 0, ["正面占比（大模型）", "llm_positive_rate", v => pct(v), "大模型逐条判断（抽样推算）的正面评论比例"],
-      ["负面占比（大模型）", "llm_negative_rate", v => pct(v), "大模型逐条判断（抽样推算）的负面评论比例"]);
+    charts.splice(5, 0, ["正面占比（大模型）", "llm_positive_rate", v => pct(v), "大模型逐条判断为正面的一级评论比例"],
+      ["负面占比（大模型）", "llm_negative_rate", v => pct(v), "大模型逐条判断为负面的一级评论比例"]);
   }
   $("charts").replaceChildren(...charts.map(([title, key, f, sub]) => {
     const host = h("div", { class: "chart" });
